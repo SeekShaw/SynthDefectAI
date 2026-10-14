@@ -1,0 +1,53 @@
+# ---- PyInstaller 构建中间产物（体积巨大，可由 .spec 重新生成）----
+build/
+*.manifest
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 测试/调试输出目录 ----
+out/
+out_*/
+output/
+outputs/
+templates_*/
+cli_e2e/
+cli_tpl/
+exe_e2e/
+exe_tpl/
+tpl_test/
+template_test/
+gui_shots/
+chip_test/
+chip_tune/
+verify_region/
+
+# ---- 运行日志与临时文件 ----
+*.log
+*.txt.tmp
+exe_check.txt
+exe_cli_check.txt
+exe_cli_files.txt
+exe_mlcc_check.txt
+exe_mlcc_files.txt
+smoke_gui.log
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 注意：dist/ 中的单文件 exe（dist/SynthDefectAI.exe）是有意提交的分发产物，
+#      故不忽略 dist/ 目录本身。若只想保留源码，删除下面这行即可。----

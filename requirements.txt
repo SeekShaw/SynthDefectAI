@@ -1,0 +1,4 @@
+PyQt6>=6.6
+opencv-python>=4.8
+numpy>=1.26
+pyinstaller>=6.0
