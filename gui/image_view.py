@@ -71,14 +71,48 @@ class ImageView(QWidget):
         self._pan_start = QPointF(0, 0)
         self._pan_off_start = QPointF(0, 0)
 
+        # ---- 产品轮廓叠加层（与图像同尺寸的 RGBA 图元，绘制在手绘图元之下）----
+        self._overlay: Optional[QPixmap] = None
+
+    # ---------------- 叠加层（产品轮廓 / 限定范围） ----------------
+    def set_overlay(self, rgba: Optional[np.ndarray]):
+        """设置叠加层。``rgba`` 为 (H,W,4) uint8 的 RGBA 图元，尺寸须与图像一致。
+
+        叠加层用于把「识别到的产品轮廓」「手绘限定范围」画在图像上，
+        让用户在绘制前就能看到缺陷会被限制在哪里。
+        """
+        if rgba is None:
+            self._overlay = None
+        else:
+            arr = np.ascontiguousarray(np.clip(rgba, 0, 255).astype(np.uint8))
+            if arr.ndim != 3 or arr.shape[2] != 4:
+                self._overlay = None
+            else:
+                h, w = arr.shape[:2]
+                if (self._img_size.width(), self._img_size.height()) != (w, h):
+                    # 尺寸不匹配（如换图后旧叠加层残留）→ 丢弃，避免错位
+                    self._overlay = None
+                else:
+                    # ⚠️ PyQt6 的 QPixmap 没有接受缓冲区数据的重载，必须先包成 QImage
+                    #    （与 np_to_qpixmap 同样做法），否则报
+                    #    "QPixmap(w: int, h: int): argument 1 has unexpected type 'memoryview'"。
+                    #    .copy() 必不可少：qimg 借用了 numpy 的缓冲区，数组回收后会悬垂。
+                    qimg = QImage(arr.data, w, h, w * 4,
+                                  QImage.Format.Format_RGBA8888)
+                    self._overlay = QPixmap.fromImage(qimg.copy())
+        self.update()
+
     # ---------------- 数据 ----------------
     def set_image(self, arr: Optional[np.ndarray]):
         if arr is None:
             self._pixmap = None
             self._img_size = QSize(0, 0)
+            self._overlay = None
         else:
             self._pixmap = np_to_qpixmap(arr)
             self._img_size = QSize(self._pixmap.width(), self._pixmap.height())
+            # 换图后旧的轮廓叠加层尺寸已不匹配，直接丢弃，由上层重新设置
+            self._overlay = None
         if self._fit_mode:
             self.fit_to_window()
         self.update()
@@ -561,6 +595,11 @@ class ImageView(QWidget):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, s < 3.0)
         p.drawPixmap(target, self._pixmap,
                      QRectF(0, 0, self._pixmap.width(), self._pixmap.height()))
+
+        # 产品轮廓 / 限定范围叠加层（画在图像之上、手绘图元之下）
+        if self._overlay is not None and not self._overlay.isNull():
+            p.drawPixmap(target, self._overlay,
+                         QRectF(0, 0, self._overlay.width(), self._overlay.height()))
 
         # 手绘区域：ROI 框（可旋转）
         pen = QPen(QColor(76, 154, 255, 230))

@@ -541,6 +541,66 @@ def region_overlay(rgb: np.ndarray, res: RegionResult,
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def _draw_contour(canvas: np.ndarray, mask: np.ndarray,
+                  color: Tuple[int, int, int], width: int,
+                  alpha: int = 255, dashed: bool = False) -> None:
+    """在 RGBA canvas 上描出 mask 的轮廓（就地修改）。"""
+    try:
+        import cv2
+    except Exception:
+        return
+    if mask is None or mask.max() <= 0.5:
+        return
+    m = (np.asarray(mask, np.float32) > 0.5).astype(np.uint8)
+    # 先闭运算把毛刺连起来，避免轮廓碎成多条
+    k = max(1, int(width))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    rgba = np.array([color[0], color[1], color[2], alpha], np.uint8)
+    for c in cnts:
+        if dashed:
+            # 虚线：沿轮廓等距取点，两点一段
+            pts = c.reshape(-1, 2)
+            if len(pts) < 2:
+                continue
+            closed = np.vstack([pts, pts[:1]])
+            step = max(6, int(width * 4))
+            for i in range(0, len(closed), step * 2):
+                seg = closed[i:i + step + 1]
+                if len(seg) >= 2:
+                    cv2.polylines(canvas, [seg.astype(np.int32)], False,
+                                  tuple(int(x) for x in rgba), width,
+                                  lineType=cv2.LINE_8)
+        else:
+            cv2.drawContours(canvas, [c], -1,
+                             tuple(int(x) for x in rgba), width, lineType=cv2.LINE_8)
+
+
+def product_outline_overlay(shape: Tuple[int, int],
+                            product: Optional[np.ndarray] = None,
+                            draw_region: Optional[np.ndarray] = None,
+                            color: Tuple[int, int, int] = (255, 80, 80),
+                            width: int = 2,
+                            show_product: bool = True,
+                            show_draw: bool = True) -> np.ndarray:
+    """生成「产品轮廓 + 手绘限定范围」的 RGBA 叠加层（(H,W,4) uint8）。
+
+    用于在预览图上把缺陷的允许生成范围画出来：
+    - 产品轮廓：实线，颜色由 ``color`` 指定（可在界面用取色器修改）；
+    - 手绘限定范围：虚线（与产品轮廓区分），表示「缺陷只能落在这里」。
+
+    两者都为 None 时返回全透明图层。
+    """
+    h, w = int(shape[0]), int(shape[1])
+    canvas = np.zeros((h, w, 4), np.uint8)
+    wd = max(1, int(width))
+    if show_draw and draw_region is not None:
+        _draw_contour(canvas, draw_region, (255, 210, 60), wd, alpha=235, dashed=True)
+    if show_product and product is not None:
+        _draw_contour(canvas, product, color, wd, alpha=255, dashed=False)
+    return canvas
+
+
 def sample_point(mask: np.ndarray, rng: Rng, margin: float = 0.05) -> Tuple[float, float]:
     """从掩膜内随机取一点 (x, y)，避开边缘 margin 比例。"""
     ys, xs = np.nonzero(mask > 0.5)

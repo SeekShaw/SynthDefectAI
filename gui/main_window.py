@@ -21,11 +21,12 @@ from core.batch import (BatchConfig, DEFAULT_SETTINGS, KIND_CN, SEVERITY_CN,
                         TARGET_CN, ItemResult, run_batch)
 from core.defects import (DEFECT_KINDS, apply_augmentation, apply_defects,
                         _KIND_TO_COLOR)
-from core.mlcc_region import segment_mlcc, region_overlay
+from core.mlcc_region import (product_outline_overlay, region_overlay,
+                             segment_mlcc)
 from core.utils import clip01, imread, imwrite, list_images, to_u8
 
 from .image_view import ImageView, np_to_qpixmap
-from .preview_pane import PreviewPane
+from .preview_pane import POS_MODE_PIXEL, POS_MODE_PRODUCT, PreviewPane
 
 _KIND_COLOR = dict(_KIND_TO_COLOR)   # 各缺陷类型在叠加图里的颜色
 
@@ -499,6 +500,8 @@ class MainWindow(QMainWindow):
         self.preview.modeChanged.connect(self._on_draw_mode_changed)
         self.preview.drawToggled.connect(self._on_draw_toggled)
         self.preview.rectAngleChanged.connect(self._on_rect_angle)
+        self.preview.posModeChanged.connect(self._on_pos_mode_changed)
+        self.preview.overlayChanged.connect(self._refresh_overlay)
         self.split_main.addWidget(self.preview)
 
         # 中间：增强样本缩略图画廊（框选区域空出后放这里）
@@ -914,6 +917,7 @@ class MainWindow(QMainWindow):
     def _on_region_drawn(self):
         self._seg_key = None
         self._seg_res = None
+        self._refresh_overlay()      # 黄色虚线（限定范围）随手绘实时更新
         self.schedule_preview()
 
     def _on_draw_mode_changed(self, mode: str):
@@ -971,44 +975,90 @@ class MainWindow(QMainWindow):
             f"ROI 角度已改为 {self.preview.sp_angle.value()}°，"
             "划痕会沿该方向生成")
 
+    # ---------------- 缺陷位置方式 ----------------
+    def _pos_mode(self) -> str:
+        return self.preview.pos_mode()
+
+    def _on_pos_mode_changed(self, mode: str):
+        """切换「产品轮廓内 / 图像坐标」。两种模式的区域来源不同，需重算。"""
+        self._seg_key = None
+        self._seg_res = None
+        self.schedule_preview()
+        self.status.showMessage(
+            "缺陷位置：限定在产品轮廓内（缺陷 = 产品表面 ∩ 手绘区域）"
+            if mode == POS_MODE_PRODUCT else
+            "缺陷位置：按图像坐标位置（忽略产品识别，手绘区域像素坐标直接生效）")
+
+    def _region_masks_for(self, seg) -> Optional[dict]:
+        """按当前「缺陷位置方式」算出用于生成缺陷的区域掩膜。
+
+        - ``POS_MODE_PRODUCT``：**产品表面 ∩ 手绘区域**。
+          交集在这里显式相乘完成（而不是把手绘区域喂给 segment_mlcc），
+          这样 seg 保持为产品真实轮廓，轮廓线画出来才有参考意义。
+        - ``POS_MODE_PIXEL``：直接把手绘区域像素掩膜当作可用表面，
+          **完全绕开产品识别**，因此产品识别准不准都不影响缺陷落点。
+        """
+        dm = self._draw_mask()
+        if self._pos_mode() == POS_MODE_PIXEL:
+            if dm is None:
+                return None
+            # body/electrode 都填同一份手绘掩膜：target='both' 时取并集即为手绘区域
+            return {"body": dm, "electrode": dm}
+        if seg is None or (seg.body.max() <= 0.1 and seg.electrode.max() <= 0.1):
+            return None
+        if dm is None:
+            return {"body": seg.body, "electrode": seg.electrode}
+        body = clip01(seg.body * dm)
+        elec = clip01(seg.electrode * dm)
+        # ⚠️ 交集可能整块落空（手绘区域完全画在产品外）。此时必须返回 None，
+        #    否则调用方拿到的是「两个全零掩膜」，resolve_target 会退化成 None，
+        #    缺陷反而会洒满整图 —— 与限定区域的意图正好相反。
+        if body.max() <= 0.1 and elec.max() <= 0.1:
+            return None
+        return {"body": body, "electrode": elec}
+
+    def _refresh_overlay(self, *_):
+        """重画产品轮廓 / 限定范围叠加层（颜色、线宽、显隐或区域变化时调用）。"""
+        if self.current_image is None:
+            return
+        h, w = self.current_image.shape[:2]
+        # 两种模式都画产品轮廓：在「图像坐标」模式下轮廓仅供对照参考，
+        # 不参与缺陷落点计算，因此产品识别不准也不影响结果。
+        seg = self._ensure_segmentation()
+        show_p = self.preview.show_product_outline() and seg is not None
+        show_d = self.preview.show_draw_area()
+        if not show_p and not show_d:
+            self.preview.set_overlay(None)
+            return
+        self.preview.set_overlay(product_outline_overlay(
+            (h, w),
+            product=seg.product if show_p else None,
+            draw_region=self._draw_mask() if show_d else None,
+            color=self.preview.outline_color(),
+            width=self.preview.outline_width(),
+            show_product=show_p, show_draw=show_d))
+
     def _ensure_segmentation(self):
         """对当前预览图运行（或取缓存）区域检测。"""
         if self.current_image is None:
             return None
         dm = self._draw_mask()
-        # ⚠️ 缓存键必须能区分「面积相同、位置不同」的手绘区域。
-        #    旧键只用 dm.sum()（面积），把不同位置的等面积笔迹/矩形当成同一个区域，
-        #    复用上一块的分割结果 → 缺陷落到手绘区之外。
-        #    这里对掩膜内容做位置敏感哈希（包围盒 + 采样点 + 校验和）。
-        key = (self.lst.currentRow(),) + self._seg_params() + (
-            None if dm is None else self._region_fingerprint(dm),)
+        # 分割**不喂**手绘区域：得到的是产品的真实轮廓，既用于画轮廓线，
+        # 也用于「产品 ∩ 手绘」的交集计算。若把手绘区域喂进去，
+        # seg.product 会被裁到手绘区里，画出来的「产品轮廓」就只是手绘框的复制，
+        # 用户反而看不出产品真正的边界在哪。
+        # 因此这里与 dm 无关，缓存键也不含 dm（画笔改动不必重新分割）。
+        key = (self.lst.currentRow(),) + self._seg_params()
         if self._seg_key == key and self._seg_res is not None:
             return self._seg_res
         try:
-            res = segment_mlcc(
-                self.current_image,
-                user_region=dm,
-                user_region_mode=self.preview.draw_mode())
+            res = segment_mlcc(self.current_image)
         except Exception as e:
             self.status.showMessage(f"区域检测错误：{e}")
             res = None
         self._seg_key = key
         self._seg_res = res
         return self._seg_res
-
-    @staticmethod
-    def _region_fingerprint(dm: np.ndarray):
-        """手绘区域掩膜的位置敏感指纹（用于缓存键，区分同面积不同位置的区域）。"""
-        ys, xs = np.nonzero(dm > 0.5)
-        if xs.size == 0:
-            return ("empty",)
-        bbox = (int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max()))
-        # 在若干固定比例位置采样，使不同形状即使包围盒相同也能区分
-        h, w = dm.shape
-        grid = tuple(round(float(dm[int(y * (h - 1)), int(x * (w - 1))]), 3)
-                     for y in (0.1, 0.3, 0.5, 0.7, 0.9) for x in (0.1, 0.3, 0.5, 0.7, 0.9))
-        chk = int(dm[::7, ::7].sum() * 1000)
-        return (bbox, grid, chk)
 
     # ---------------- 输出 ----------------
     def pick_out(self):
@@ -1223,6 +1273,8 @@ class MainWindow(QMainWindow):
             return
         # 用户可能画完线还没双击/回车结束就先点了刷新 —— 这里帮他提交
         self.preview.commit_pending()
+        # 产品轮廓 / 限定范围叠加层：两种模式都画（先画好，之后切换模式不必重算分割）
+        self._refresh_overlay()
         if self.cb_augment.isChecked():
             self._refresh_augment_preview()
             return
@@ -1231,7 +1283,7 @@ class MainWindow(QMainWindow):
         settings = self.current_settings()
         seg = self._ensure_segmentation()
         seg_overlay = None
-        if seg is not None and seg.ok:
+        if seg is not None and seg.ok and self._pos_mode() == POS_MODE_PRODUCT:
             seg_overlay = region_overlay(self.current_image, seg)
 
         # 划痕只认「手绘线条」：勾选了划痕但没画线时跳过，并在信息栏提示
@@ -1264,18 +1316,22 @@ class MainWindow(QMainWindow):
         ok = False
         try:
             seed = int(self.sp_seed.value())
-            region_masks = None
-            if seg is not None and (seg.body.max() > 0.1 or seg.electrode.max() > 0.1):
-                region_masks = {"body": seg.body, "electrode": seg.electrode}
-            # 手绘区域与产品表面完全不相交时（画到了产品外）不生成缺陷，
-            # 否则 region 会退化为 None，缺陷就会洒满整图（与限定区域的意图相反）。
+            region_masks = self._region_masks_for(seg)
+            # 限定了手绘区域却算不出可用区域时，不生成缺陷并明确说明原因。
+            # 两种模式的原因不同：产品轮廓模式是「手绘区没画到产品上」，
+            # 像素坐标模式则不应发生（区域就是手绘掩膜本身）。
             dm = self._draw_mask()
             if dm is not None and region_masks is None:
                 self.preview.set_images(self.current_image, seg_overlay,
                                         self.current_image)
                 self.defect_view.set_image(self.current_image)
-                self.preview.set_info("手绘区域未覆盖产品表面：请在产品上重新绘制限定区域")
-                self.status.showMessage("手绘区域与产品无交集，未生成缺陷")
+                if self._pos_mode() == POS_MODE_PIXEL:
+                    msg = "手绘区域无效，请重新绘制限定区域"
+                else:
+                    msg = ("手绘区域未覆盖产品表面（缺陷位置方式为「限定在产品轮廓内」）。"
+                           "请把限定区域画在产品上，或改用「按图像坐标位置」")
+                self.preview.set_info(msg)
+                self.status.showMessage(msg)
                 return
             img, applied = apply_defects(self.current_image, settings, seed=seed,
                                          region_masks=region_masks,
@@ -1297,18 +1353,26 @@ class MainWindow(QMainWindow):
                     f"/{SEVERITY_CN.get(getattr(r, 'severity', 'mixed'), '?')}]"
                     for r in applied)
                 cover = sum(float((r.mask > 0.35).mean()) for r in applied) * 100
-                # 落点校验：缺陷是否越出产品
+                # 落点校验：缺陷是否越出允许范围
+                # （产品轮廓模式看产品表面；像素坐标模式看手绘区域本身）
+                limit = None
+                if self._pos_mode() == POS_MODE_PIXEL:
+                    limit = self._draw_mask()
+                elif seg is not None and seg.product.max() > 0.1:
+                    limit = seg.product
                 leak = 0.0
-                if seg is not None and seg.product.max() > 0.1:
-                    out_mask = (seg.product < 0.5)
+                if limit is not None:
+                    out_mask = (limit < 0.5)
                     total = sum(float((r.mask > 0.05).sum()) for r in applied)
                     if total > 0:
                         leak = sum(float(((r.mask > 0.05) & out_mask).sum())
                                    for r in applied) / total * 100
+                mode_tag = ("产品轮廓内" if self._pos_mode() == POS_MODE_PRODUCT
+                            else "图像坐标")
                 self.preview.set_images(self.current_image, mid, img)
                 self.defect_view.set_image(img)
                 self.preview.set_info(
-                    f"{kinds} ｜ 缺陷占比{cover:.2f}% ｜ 越界{leak:.2f}%"
+                    f"{kinds} ｜ 位置[{mode_tag}] ｜ 缺陷占比{cover:.2f}% ｜ 越界{leak:.2f}%"
                     f"{line_hint or self._hint_note()} ｜ seed={seed}")
             else:
                 self.preview.set_images(self.current_image, mid, img)
@@ -1357,14 +1421,17 @@ class MainWindow(QMainWindow):
                 settings = {k: dict(v) for k, v in settings.items()}
                 settings["scratch"]["enable"] = False
             seg = self._ensure_segmentation()
-            region_masks = None
-            if seg is not None and (seg.body.max() > 0.1 or seg.electrode.max() > 0.1):
-                region_masks = {"body": seg.body, "electrode": seg.electrode}
-            # 与预览一致：手绘区域未覆盖产品时直接不生成，避免缺陷洒满整图
+            region_masks = self._region_masks_for(seg)
+            # 与预览一致：算不出可用区域时直接不生成，避免缺陷洒满整图
             if self._draw_mask() is not None and region_masks is None:
+                tip = ("请把限定区域画在产品表面上。"
+                       if self._pos_mode() == POS_MODE_PRODUCT else
+                       "请重新绘制限定区域。")
                 QMessageBox.information(
                     self, "未生成缺陷",
-                    "手绘区域未覆盖产品表面。\n\n请在产品表面上重新绘制限定区域。")
+                    "手绘区域没有可用的生成范围。\n\n" + tip
+                    + "\n\n（可在「缺陷位置」里改为「按图像坐标位置」，"
+                      "此时不受产品识别影响）")
                 return
             img, applied = apply_defects(self.current_image, settings, seed=seed,
                                          region_masks=region_masks,

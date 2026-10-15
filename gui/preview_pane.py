@@ -4,11 +4,17 @@ from __future__ import annotations
 from typing import List, Optional
 
 from PyQt6.QtCore import QPointF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame,
                              QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                              QSlider, QSpinBox, QVBoxLayout, QWidget)
 
 from .image_view import ImageView
+
+#: 缺陷位置方式：限定在自动识别到的产品轮廓内
+POS_MODE_PRODUCT = "product"
+#: 缺陷位置方式：直接按手绘区域的图像像素坐标，不依赖产品识别
+POS_MODE_PIXEL = "pixel"
 
 
 class PreviewPane(QWidget):
@@ -17,12 +23,15 @@ class PreviewPane(QWidget):
     - 三栏缩放/平移同步
     - 最左栏可切换为「手绘区域」模式（矩形 / 涂抹）
     - 顶部工具条承载手绘开关（画笔 / 可旋转矩形 ROI）+ 缩放
+    - 「缺陷位置方式」决定限定区域语义：产品轮廓内 / 纯图像坐标
     """
 
     regionChanged = pyqtSignal()
     modeChanged = pyqtSignal(str)
     drawToggled = pyqtSignal(bool)          # 启用手绘区域
     rectAngleChanged = pyqtSignal(float)    # ROI 框角度（度）
+    posModeChanged = pyqtSignal(str)        # 缺陷位置方式变化
+    overlayChanged = pyqtSignal()           # 轮廓颜色/线宽/显隐变化
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -34,6 +43,7 @@ class PreviewPane(QWidget):
         # 切到「画线条」，从而触发 _on_mode() 访问 views[0]
         self.views: List[ImageView] = []
         self.caps: List[QLabel] = []
+        self._overlay_arr = None      # 最近一次的产品轮廓叠加层 (H,W,4)
 
         lay.addLayout(self._build_bar())
 
@@ -74,10 +84,97 @@ class PreviewPane(QWidget):
         wrap.setContentsMargins(0, 0, 0, 0)
         wrap.setSpacing(6)
         wrap.addLayout(self._bar_draw())
+        wrap.addLayout(self._bar_posmode())
         wrap.addLayout(self._bar_zoom())
         wrap.addLayout(self._bar_info())
         self._sync_brush_enabled()
         return wrap
+
+    def _bar_posmode(self) -> QHBoxLayout:
+        """缺陷位置方式：产品轮廓内 / 图像坐标 + 轮廓显示设置。"""
+        bar = QHBoxLayout()
+        bar.setSpacing(6)
+
+        t = QLabel("缺陷位置")
+        t.setProperty("role", "title")
+        bar.addWidget(t)
+
+        # ---- 位置方式 ----
+        self.cmb_posmode = QComboBox()
+        self.cmb_posmode.addItem("限定在产品轮廓内", POS_MODE_PRODUCT)
+        self.cmb_posmode.addItem("按图像坐标位置", POS_MODE_PIXEL)
+        self.cmb_posmode.setFixedWidth(190)
+        self.cmb_posmode.setToolTip(
+            "① 限定在产品轮廓内：先自动识别产品位置，缺陷只能生成在\n"
+            "「产品表面 ∩ 手绘区域」内（识别不准时缺陷位置也会受影响）。\n"
+            "② 按图像坐标位置：不依赖产品识别，手绘区域的像素坐标\n"
+            "直接作为缺陷生成范围，产品识别对错都不影响落点。")
+        self.cmb_posmode.currentIndexChanged.connect(self._on_posmode_changed)
+        bar.addWidget(self.cmb_posmode)
+
+        bar.addSpacing(10)
+
+        # ---- 轮廓显示 ----
+        self.cb_show_outline = QCheckBox("显示产品轮廓")
+        self.cb_show_outline.setChecked(True)
+        self.cb_show_outline.setToolTip("在预览图上用明显的线条描出识别到的产品轮廓")
+        self.cb_show_outline.toggled.connect(lambda _v: self.overlayChanged.emit())
+        bar.addWidget(self.cb_show_outline)
+
+        self.lbl_outline_color = QLabel("轮廓色")
+        bar.addWidget(self.lbl_outline_color)
+        self.btn_outline_color = QPushButton("■")
+        self.btn_outline_color.setFixedSize(46, 24)
+        self.btn_outline_color.setToolTip("点击选择产品轮廓线的颜色")
+        self._outline_color = (255, 80, 80)
+        self.btn_outline_color.clicked.connect(self._pick_outline_color)
+        bar.addWidget(self.btn_outline_color)
+
+        self.lbl_outline_w = QLabel("线宽")
+        bar.addWidget(self.lbl_outline_w)
+        self.sp_outline_w = QSpinBox()
+        self.sp_outline_w.setRange(1, 8)
+        self.sp_outline_w.setValue(2)
+        self.sp_outline_w.setSuffix(" px")
+        self.sp_outline_w.setFixedWidth(70)
+        self.sp_outline_w.setToolTip("产品轮廓线的粗细（像素）")
+        self.sp_outline_w.valueChanged.connect(lambda _v: self.overlayChanged.emit())
+        bar.addWidget(self.sp_outline_w)
+
+        self.cb_show_drawarea = QCheckBox("显示限定范围")
+        self.cb_show_drawarea.setChecked(True)
+        self.cb_show_drawarea.setToolTip("用黄色虚线标出手绘限定范围，缺陷只能落在这个范围内")
+        self.cb_show_drawarea.toggled.connect(lambda _v: self.overlayChanged.emit())
+        bar.addWidget(self.cb_show_drawarea)
+
+        bar.addStretch(1)
+        return bar
+
+    def _pick_outline_color(self):
+        from PyQt6.QtGui import QColorDialog
+        c = QColorDialog.getColor(
+            QColor(*self._outline_color), self, "选择产品轮廓颜色")
+        if c.isValid():
+            self._outline_color = (c.red(), c.green(), c.blue())
+            self.btn_outline_color.setStyleSheet(
+                f"background:rgb({c.red()},{c.green()},{c.blue()});")
+            self.overlayChanged.emit()
+
+    def pos_mode(self) -> str:
+        """当前缺陷位置方式（POS_MODE_PRODUCT / POS_MODE_PIXEL）。"""
+        return self.cmb_posmode.currentData()
+
+    def outline_color(self):
+        return self._outline_color
+
+    def outline_width(self) -> int:
+        return int(self.sp_outline_w.value())
+
+    def show_product_outline(self) -> bool:
+        return self.cb_show_outline.isChecked()
+
+    def show_draw_area(self) -> bool:
+        return self.cb_show_drawarea.isChecked()
 
     def _bar_draw(self) -> QHBoxLayout:
         bar = QHBoxLayout()
@@ -240,6 +337,27 @@ class PreviewPane(QWidget):
     def set_images(self, orig, mask_rgb, defect):
         for i, arr in enumerate((orig, mask_rgb, defect)):
             self.views[i].set_image(arr)
+        # set_image 会清掉叠加层，这里把最近一次的轮廓重新贴回去，
+        # 避免每次刷新预览后产品轮廓就消失了
+        self._reapply_overlay()
+
+    def set_source_image(self, arr):
+        """只更新最左栏（原图 / 手绘区域），保留三栏缩放与叠加层设置。"""
+        self.views[0].set_image(arr)
+        self._reapply_overlay()
+
+    def set_overlay(self, rgba):
+        """把产品轮廓 / 限定范围叠加层画到最左栏（手绘那栏）。"""
+        self._overlay_arr = rgba
+        self.views[0].set_overlay(rgba)
+
+    def _reapply_overlay(self):
+        if getattr(self, "_overlay_arr", None) is not None:
+            self.views[0].set_overlay(self._overlay_arr)
+
+    def _on_posmode_changed(self, _idx: int):
+        self.posModeChanged.emit(self.pos_mode())
+        self.overlayChanged.emit()
 
     def set_info(self, text: str):
         self.lbl_info.setText(text)

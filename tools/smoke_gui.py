@@ -259,10 +259,24 @@ def main() -> int:
     check(all(p._cols == 2 for p in win.pages.values()),
           "恢复宽窗后重新排成两列")
 
-    # 预览工具条改为三行（窄窗下控件不被挤扁、文字完整）
+    # 预览工具条为四行（窄窗下控件不被挤扁、文字完整）
+    # 四行 = 手绘 / 缺陷位置方式+轮廓 / 缩放 / 状态信息
     tbar = win.preview.layout().itemAt(0).layout()
-    check(isinstance(tbar, QVBoxLayout) and tbar.count() == 3,
-          f"预览工具条为三行排布（实际 {type(tbar).__name__}/{tbar.count()}）")
+    check(isinstance(tbar, QVBoxLayout) and tbar.count() == 4,
+          f"预览工具条为四行排布（实际 {type(tbar).__name__}/{tbar.count()}）")
+
+    # 「缺陷位置」行必须齐备：位置方式下拉 + 轮廓显隐/颜色/线宽/限定范围
+    _pm = win.preview.pos_mode()
+    check(_pm in ("product", "pixel"),
+          f"缺陷位置方式下拉有有效值（{_pm}）")
+    check(isinstance(win.preview.outline_color(), tuple)
+          and len(win.preview.outline_color()) == 3,
+          f"轮廓颜色为 RGB 三元组（{win.preview.outline_color()}）")
+    check(1 <= win.preview.outline_width() <= 8,
+          f"轮廓线宽在 1~8 内（{win.preview.outline_width()}）")
+    check(isinstance(win.preview.show_product_outline(), bool)
+          and isinstance(win.preview.show_draw_area(), bool),
+          "轮廓显隐 / 限定范围开关可用")
 
     # ================= 需求 3：无日志块 =================
     check(not hasattr(win, "log_box"), "已删除日志块 log_box")

@@ -38,16 +38,17 @@ def check(cond, msg):
         fails.append(msg)
 
 
-def phantom(seg, dm):
-    """「幽灵像素」：分割把用户没实画的淡边当成产品实心表面。
+def phantom(region_masks, dm):
+    """「幽灵像素」：真正传给生成器的区域掩膜越出了手绘范围。
 
-    这是归一化抵消 bug 的直接指纹 —— 旧实现里 product 羽化边缘 × 微弱手绘
-    经 body/(body+elec) 归一化后被重新放大回 1.0，凭空多出一圈本不属于
-    手绘区域的可用表面，缺陷就会落到那里。修复后应为 0。
+    注意：现在的架构里 ``segment_mlcc`` **不**再吃手绘区域，``seg.product``
+    是完整的产品真实轮廓（用于画轮廓线），它超出手绘范围是完全正常的。
+    真正必须被约束的是 ``region_masks`` —— 也就是 ``MainWindow._region_masks_for``
+    算出来、直接喂给 ``apply_defects`` 的那份掩膜。它必须落在手绘区域内。
     """
-    if seg is None:
+    if not region_masks:
         return 0
-    region = np.maximum(seg.body, seg.electrode)
+    region = np.maximum(region_masks["body"], region_masks["electrode"])
     return int(((region > 0.5) & (dm < 0.5)).sum())
 
 
@@ -93,13 +94,13 @@ def main():
         app.processEvents()
         dm = win._draw_mask()
         seg = win._ensure_segmentation()
-        rm = None
-        if seg is not None and (seg.body.max() > 0.1 or seg.electrode.max() > 0.1):
-            rm = {"body": seg.body, "electrode": seg.electrode}
+        # 直接复用界面真实使用的区域计算（而不是在这里另写一份），
+        # 否则测试验证的就不是产品真正跑的那条路径了。
+        rm = win._region_masks_for(seg)
         if dm is not None and rm is None:
             return "off_product", dm, 0
-        # 先查「幽灵像素」：分割把手绘淡边当成产品实心表面的部分
-        ph = phantom(seg, dm) if dm is not None else 0
+        # 「幽灵像素」：真正用于生成缺陷的区域掩膜越出了手绘范围
+        ph = phantom(rm, dm) if dm is not None else 0
         img, applied = apply_defects(
             win.current_image, win.current_settings(), seed=seed,
             region_masks=rm, region_hint=win._draw_hint())
@@ -115,18 +116,18 @@ def main():
     for fy in (0.30, 0.40, 0.55, 0.70):
         worst, dm, ph = run(lambda fy=fy: brush(fy))
         check(worst == 0, "笔迹 y=%.2fH：硬越界像素=%d" % (fy, worst))
-        check(ph == 0, "笔迹 y=%.2fH：幽灵像素(分割把手绘淡边当产品)=%d" % (fy, ph))
+        check(ph == 0, "笔迹 y=%.2fH：生成用区域掩膜越出手绘=%d" % (fy, ph))
 
     print("[2] 矩形框：不同位置")
     for fx, fy in ((0.38, 0.45), (0.25, 0.30), (0.55, 0.60), (0.70, 0.50)):
         worst, dm, ph = run(lambda fx=fx, fy=fy: rect(fx, fy))
         check(worst == 0, "矩形 (%.2f,%.2f)：硬越界像素=%d" % (fx, fy, worst))
-        check(ph == 0, "矩形 (%.2f,%.2f)：幽灵像素=%d" % (fx, fy, ph))
+        check(ph == 0, "矩形 (%.2f,%.2f)：生成用区域掩膜越出手绘=%d" % (fx, fy, ph))
 
     print("[3] 多边形")
     worst, dm, ph = run(poly)
     check(worst == 0, "多边形：硬越界像素=%d" % worst)
-    check(ph == 0, "多边形：幽灵像素=%d" % ph)
+    check(ph == 0, "多边形：生成用区域掩膜越出手绘=%d" % ph)
 
     print("[4] 不同随机种子（笔迹 y=0.35H）")
     for s in (1, 7, 42, 99):
