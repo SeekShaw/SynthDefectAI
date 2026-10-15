@@ -485,6 +485,15 @@ def segment_mlcc(rgb: np.ndarray,
     body_soft = _feather(body_m, feather) * product
     elec_soft = _feather(elec_m, feather) * product
 
+    # 先做「瓷体 / 电极」软分配（两者互补，和为 1）。
+    # ⚠️ 必须排在「用户手绘区域」之前：归一化是除以 (body+elec)，
+    #    若先乘了手绘区域 ur 再归一化，ur 会被整除抵消（除零下限 1e-6 还会把
+    #    产品羽化边缘 × 微弱手绘的像素重新放大回 1.0），导致限定区域形同虚设、
+    #    缺陷落到手绘区之外。现在先归一化定表面，再由 ur 做硬性裁剪。
+    tot = np.maximum(body_soft + elec_soft, 1e-6)
+    body_soft = np.minimum(body_soft / tot, 1.0)
+    elec_soft = np.minimum(elec_soft / tot, 1.0)
+
     # ---------- 5. 用户手绘区域 ----------
     if user_region is not None and user_region.max() > 0.1:
         ur = clip01(user_region)
@@ -503,11 +512,10 @@ def segment_mlcc(rgb: np.ndarray,
             body_soft = clip01(body_soft + add)
             product = clip01(np.maximum(product, ur))
         else:  # intersect（默认）
+            # 与产品表面取交集：缺陷严格限制在「手绘区域 ∩ 产品表面」内
             body_soft = clip01(body_soft * ur)
             elec_soft = clip01(elec_soft * ur)
-        tot = np.maximum(body_soft + elec_soft, 1e-6)
-        body_soft = np.minimum(body_soft / tot, 1.0)
-        elec_soft = np.minimum(elec_soft / tot, 1.0)
+            product = clip01(product * ur)
         notes.append(f"已应用手绘区域（{mode}）")
 
     region = np.zeros((h, w), np.uint8)

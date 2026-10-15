@@ -976,8 +976,12 @@ class MainWindow(QMainWindow):
         if self.current_image is None:
             return None
         dm = self._draw_mask()
+        # ⚠️ 缓存键必须能区分「面积相同、位置不同」的手绘区域。
+        #    旧键只用 dm.sum()（面积），把不同位置的等面积笔迹/矩形当成同一个区域，
+        #    复用上一块的分割结果 → 缺陷落到手绘区之外。
+        #    这里对掩膜内容做位置敏感哈希（包围盒 + 采样点 + 校验和）。
         key = (self.lst.currentRow(),) + self._seg_params() + (
-            None if dm is None else (float(dm.sum()),),)
+            None if dm is None else self._region_fingerprint(dm),)
         if self._seg_key == key and self._seg_res is not None:
             return self._seg_res
         try:
@@ -991,6 +995,20 @@ class MainWindow(QMainWindow):
         self._seg_key = key
         self._seg_res = res
         return self._seg_res
+
+    @staticmethod
+    def _region_fingerprint(dm: np.ndarray):
+        """手绘区域掩膜的位置敏感指纹（用于缓存键，区分同面积不同位置的区域）。"""
+        ys, xs = np.nonzero(dm > 0.5)
+        if xs.size == 0:
+            return ("empty",)
+        bbox = (int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max()))
+        # 在若干固定比例位置采样，使不同形状即使包围盒相同也能区分
+        h, w = dm.shape
+        grid = tuple(round(float(dm[int(y * (h - 1)), int(x * (w - 1))]), 3)
+                     for y in (0.1, 0.3, 0.5, 0.7, 0.9) for x in (0.1, 0.3, 0.5, 0.7, 0.9))
+        chk = int(dm[::7, ::7].sum() * 1000)
+        return (bbox, grid, chk)
 
     # ---------------- 输出 ----------------
     def pick_out(self):
@@ -1240,6 +1258,7 @@ class MainWindow(QMainWindow):
             return
         # 进入缺陷生成：先给出明确的进度提示，避免界面在同步计算时看似卡死
         self.status.showMessage("正在生成缺陷预览…")
+        self.progress.setRange(0, 100)
         self.progress.setRange(0, 0)  # 进度条进入忙碌动画
         QApplication.processEvents()  # 强制刷新，让提示先显示出来
         ok = False
@@ -1248,6 +1267,16 @@ class MainWindow(QMainWindow):
             region_masks = None
             if seg is not None and (seg.body.max() > 0.1 or seg.electrode.max() > 0.1):
                 region_masks = {"body": seg.body, "electrode": seg.electrode}
+            # 手绘区域与产品表面完全不相交时（画到了产品外）不生成缺陷，
+            # 否则 region 会退化为 None，缺陷就会洒满整图（与限定区域的意图相反）。
+            dm = self._draw_mask()
+            if dm is not None and region_masks is None:
+                self.preview.set_images(self.current_image, seg_overlay,
+                                        self.current_image)
+                self.defect_view.set_image(self.current_image)
+                self.preview.set_info("手绘区域未覆盖产品表面：请在产品上重新绘制限定区域")
+                self.status.showMessage("手绘区域与产品无交集，未生成缺陷")
+                return
             img, applied = apply_defects(self.current_image, settings, seed=seed,
                                          region_masks=region_masks,
                                          region_hint=self._draw_hint(),
@@ -1331,6 +1360,12 @@ class MainWindow(QMainWindow):
             region_masks = None
             if seg is not None and (seg.body.max() > 0.1 or seg.electrode.max() > 0.1):
                 region_masks = {"body": seg.body, "electrode": seg.electrode}
+            # 与预览一致：手绘区域未覆盖产品时直接不生成，避免缺陷洒满整图
+            if self._draw_mask() is not None and region_masks is None:
+                QMessageBox.information(
+                    self, "未生成缺陷",
+                    "手绘区域未覆盖产品表面。\n\n请在产品表面上重新绘制限定区域。")
+                return
             img, applied = apply_defects(self.current_image, settings, seed=seed,
                                          region_masks=region_masks,
                                          region_hint=self._draw_hint(),
