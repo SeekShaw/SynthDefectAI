@@ -103,6 +103,9 @@ class PreviewPane(QWidget):
         self.cmb_posmode = QComboBox()
         self.cmb_posmode.addItem("限定在产品轮廓内", POS_MODE_PRODUCT)
         self.cmb_posmode.addItem("按图像坐标位置", POS_MODE_PIXEL)
+        # 默认「按图像坐标位置」：产品识别不准时也能按手绘坐标精确落点，
+        # 比「限定在产品轮廓内」更少受分割误差影响。
+        self.cmb_posmode.setCurrentIndex(self.cmb_posmode.findData(POS_MODE_PIXEL))
         self.cmb_posmode.setFixedWidth(190)
         self.cmb_posmode.setToolTip(
             "① 限定在产品轮廓内：先自动识别产品位置，缺陷只能生成在\n"

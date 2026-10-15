@@ -171,8 +171,11 @@ def main() -> int:
     check(all(st0[k][v] == 1 for k, v in cnt.items()),
           f"GUI 读回的配置数量均为 1：{ {k: st0[k][v] for k, v in cnt.items()} }")
     check("curve" in win.pages["scratch"].rows, "划痕新增「弯曲度」参数行")
-    check("edge_soft" in win.pages["smudge"].rows, "脏污新增「边缘模糊」参数行")
-    check("edge_blur" in win.pages["discolor"].rows, "异色新增「边缘模糊」参数行")
+    check("edge_soft" in win.pages["smudge"].rows, "脏污有「边界柔和度」参数行")
+    check("edge_soft" in win.pages["discolor"].rows, "异色有「边界柔和度」参数行")
+    # 脏污/异色不再有「边缘模糊」——边界感改由 edge_soft 直接控制（0=清晰 1=几乎无边界）
+    check("edge_blur" not in win.pages["discolor"].rows,
+          "异色已移除「边缘模糊」（并入边界柔和度）")
 
     # ================= 需求 2：Tab 分页 + 去标题 + 限宽 =================
     tabs = win.findChildren(QTabWidget)
@@ -371,20 +374,50 @@ def main() -> int:
     if seg2 is not None and seg2.ok:
         from core.defects import apply_defects
 
-        region_masks = {"body": seg2.body, "electrode": seg2.electrode}
+        # 必须用界面真实使用的区域计算：分割结果本身是**完整产品**（不再与手绘区域
+        # 求交），「∩ 手绘区域」这一步在 _region_masks_for() 里完成。
+        # 直接拿 seg2.body 当区域会让缺陷落到整个产品上（位置校验就失去意义了）。
+        region_masks = win._region_masks_for(seg2)
+        check(region_masks is not None, "手绘∩产品 得到有效生成区域")
+        n_rm = 0 if region_masks is None else int(
+            (region_masks["body"] > 0.5).sum() + (region_masks["electrode"] > 0.5).sum())
+        print("      位置模式=%s  cb_draw=%s  dm=%.0f px  生成区域=%.0f px"
+              % (win._pos_mode(), pv.cb_draw.isChecked(),
+                 float(dm.sum()) if dm is not None else -1, n_rm))
         img, applied = apply_defects(win.current_image, win.current_settings(),
                                      seed=int(win.sp_seed.value()),
                                      region_masks=region_masks)
-        grow = (seg2.product < 0.5)
+        # 越界判据**随位置方式而定**：
+        #   · 按图像坐标位置 → 契约是「不越出手绘区域」；
+        #     注意手绘框可以画到产品之外（这正是该模式的意义），此时不能拿产品当判据。
+        #   · 限定在产品轮廓内 → 契约是「不越出产品表面」。
+        if win._pos_mode() == "pixel":
+            limit, lim_name = dm, "手绘区域"
+        else:
+            limit, lim_name = seg2.product, "产品表面"
+        grow = (limit < 0.5)
         tot = sum(float((r.mask > 0.05).sum()) for r in applied)
         out = sum(float(((r.mask > 0.05) & grow).sum()) for r in applied)
+        for _r in applied:      # 逐类定位越界来源，便于排查
+            _m = _r.mask > 0.05
+            if _m.any():
+                print("      %-7s mask=%6d 越出%s=%6d (%.1f%%)"
+                      % (_r.kind, _m.sum(), lim_name, int((_m & grow).sum()),
+                         100.0 * (_m & grow).sum() / max(_m.sum(), 1)))
         rate = (out / tot * 100) if tot else 0.0
-        print(f"      手绘区域：缺陷像素 {int(tot)}，越界 {int(out)}（{rate:.2f}%）")
-        check(rate <= 1.0, f"手绘区域越界率 ≤ 1%（实际 {rate:.2f}%）")
+        print(f"      越界判据={lim_name}：缺陷像素 {int(tot)}，越界 {int(out)}（{rate:.2f}%）")
+        check(rate <= 1.0, f"缺陷越出{lim_name}率 ≤ 1%（实际 {rate:.2f}%）")
         ys, xs = np.where(sum((r.mask > 0.05) for r in applied) > 0)
         if len(xs):
             cx = xs.mean() / w
-            check(cx < 0.60, f"缺陷集中在手绘区域侧（cx={cx:.2f}）")
+            # 注意：崩缺(chip)是**边沿**缺陷，会落在产品轮廓上，其分布中心
+            # 天然偏向产品中线而非手绘框，因此这里只对「非崩缺」缺陷做位置校验。
+            inner = [r for r in applied if r.kind != "chip"]
+            if inner:
+                ys2, xs2 = np.where(sum((r.mask > 0.05) for r in inner) > 0)
+                if len(xs2):
+                    cx = xs2.mean() / w
+                    check(cx < 0.60, f"非崩缺缺陷集中在手绘区域侧（cx={cx:.2f}）")
 
     pv.clear_regions()
     pv.cb_draw.setChecked(False)
@@ -392,12 +425,35 @@ def main() -> int:
     check(not pv.has_drawn_regions(), "取消勾选后手绘区域已清空")
     check(v0.mode == ImageView.MODE_VIEW, "取消勾选后回到浏览模式")
 
-    # ================= 需求 8：缺角缺陷 =================
-    check("chip" in win.pages, "缺角页已注册")
+    # ================= 需求 8：崩缺缺陷 =================
+    check("chip" in win.pages, "崩缺页已注册")
     chip = win.pages["chip"]
-    for key in ("size_ratio", "depth_ratio", "jag_ratio", "crack_ratio"):
-        check(key in chip.rows, f"缺角参数行存在：{key}")
-    print("      缺角配置:", chip.config())
+    for key in ("size_ratio", "depth_ratio", "jag_ratio", "crack_ratio", "corner_bias"):
+        check(key in chip.rows, f"崩缺参数行存在：{key}")
+    print("      崩缺配置:", chip.config())
+
+    # 崩缺必须贴着产品轮廓：统计缺陷像素到轮廓的距离
+    import cv2 as _cv2
+    _seg3 = win._ensure_segmentation()
+    _b = (_seg3.product > 0.5).astype(np.uint8)
+    _dt = _cv2.distanceTransform(_b, _cv2.DIST_L2, 5)
+    _img3, _ap3 = apply_defects(
+        win.current_image, {"chip": chip.config()}, seed=5,
+        region_masks={"body": _seg3.body, "electrode": _seg3.electrode})
+    _m = _ap3[0].mask > 0.05 if _ap3 else None
+    if _m is not None and _m.any():
+        _yy, _xx = np.nonzero(_m)
+        _dmin = float(_dt[_yy, _xx].min())
+        check(_dmin <= 2.0, f"崩缺紧贴产品轮廓（最小距离 {_dmin:.1f}px ≤ 2px）")
+    else:
+        check(False, "崩缺应能生成")
+
+    # ================= 新增三类缺陷 =================
+    for _k, _cn in (("dot", "黑点"), ("pit", "凹坑"), ("debris", "异物")):
+        check(_k in win.pages, f"{_cn}页已注册")
+        check("count" in win.pages[_k].rows, f"{_cn}有「个数」参数行")
+    check("fiber_ratio" in win.pages["debris"].rows, "异物有「纤维状比例」参数行")
+    print("      七类缺陷页:", list(win.pages.keys()))
 
     win.pages["scratch"].enable.setChecked(False)
     win.pages["smudge"].enable.setChecked(False)
@@ -419,10 +475,10 @@ def main() -> int:
                                  seed=123, region_masks=rm)
     kinds_applied = [r.kind for r in applied]
     print("      实际生成:", kinds_applied)
-    check("chip" in kinds_applied, "缺角缺陷已生成")
+    check("chip" in kinds_applied, "崩缺缺陷已生成")
     info = pv.lbl_info.text()
     print("      预览信息:", info)
-    check("缺角" in info, "预览信息含「缺角」")
+    check("崩缺" in info, "预览信息含「崩缺」")
     check("越界" in info, "预览信息包含「越界」指标")
     try:
         leak = float(info.split("越界")[1].split("%")[0])
@@ -667,6 +723,10 @@ def main() -> int:
                                QLabel, QSlider)):
         try:
             if wd.parentWidget() is not pv or not wd.isVisible():
+                continue
+            # 底部信息栏是「单行省略号」的状态文本（setWordWrap(False)），
+            # 文本长就被 Qt 省略，这属于设计意图，不是控件被压扁。
+            if wd is getattr(pv, "lbl_info", None):
                 continue
             mw_, mh_ = wd.minimumWidth(), wd.minimumHeight()
             need = mw_ if mw_ > 0 else wd.minimumSizeHint().width()

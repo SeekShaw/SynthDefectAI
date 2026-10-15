@@ -90,7 +90,9 @@ class SliderRow(QWidget):
         lay.setSpacing(6)
 
         self.lbl = QLabel(label)
-        self.lbl.setFixedWidth(58)
+        # 与 DefectPage.LABEL_W 保持一致；需容下最长参数名
+        # （如「边界柔和度」「纤维状比例」），否则文字被裁。
+        self.lbl.setFixedWidth(72)
         lay.addWidget(self.lbl)
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -150,7 +152,9 @@ class DefectPage(QWidget):
     changed = pyqtSignal()
 
     TWO_COL_MIN = 520       # 页宽 ≥ 该值时参数行排两列
-    LABEL_W = 58            # 参数名标签宽度（与 SliderRow 内标签对齐）
+    # 参数名标签宽度（与 SliderRow 内标签对齐）。
+    # 需容下最长的参数名（如「纤维状比例」「崩缺强度」），否则文字被裁。
+    LABEL_W = 72
 
     def __init__(self, kind: str, cfg: dict, parent=None) -> None:
         super().__init__(parent)
@@ -201,7 +205,7 @@ class DefectPage(QWidget):
             self._add("blob_count", "斑块数", 1, 20, cfg.get("blob_count", 1), integer=True)
             self._add("blob_scale", "斑块尺寸", 0.05, 0.8, cfg.get("blob_scale", 0.30))
             self._add("coverage", "覆盖率", 0.02, 0.9, cfg.get("coverage", 0.35))
-            self._add("edge_soft", "边缘模糊", 0.0, 2.5, cfg.get("edge_soft", 1.0))
+            self._add("edge_soft", "边界柔和度", 0.0, 1.0, cfg.get("edge_soft", 0.70))
             cb = QComboBox()
             for k, txt in [("auto", "自动（按底色）"), ("dark", "深色污渍"),
                            ("dust", "灰尘灰"), ("oil", "油污褐"), ("rust", "锈迹橙")]:
@@ -216,7 +220,7 @@ class DefectPage(QWidget):
             self._add("region_scale", "区域尺寸", 0.05, 0.9, cfg.get("region_scale", 0.35))
             self._add("sat_gain", "色度增益", 0.5, 2.0, cfg.get("sat_gain", 1.25))
             self._add("lum_shift", "明暗偏移", -40, 40, cfg.get("lum_shift", -8), step=1)
-            self._add("edge_blur", "边缘模糊", 0.0, 2.5, cfg.get("edge_blur", 1.0))
+            self._add("edge_soft", "边界柔和度", 0.0, 1.0, cfg.get("edge_soft", 0.75))
             # 颜色设置：指定色调 + 自定义取色
             cb = QComboBox()
             for txt, key in DISCOLOR_COLOR_OPTS:
@@ -233,12 +237,43 @@ class DefectPage(QWidget):
             self.btn_color.clicked.connect(self._pick_color)
             self._items.append(self._labeled("自定义色", self.btn_color))
         elif kind == "chip":
-            self._add("strength", "崩口强度", 0.0, 1.0, cfg.get("strength", 0.60))
-            self._add("count", "缺角数", 1, 8, cfg.get("count", 1), integer=True)
-            self._add("size_ratio", "缺角尺寸", 0.15, 0.90, cfg.get("size_ratio", 0.40))
-            self._add("depth_ratio", "崩口深度", 0.30, 1.50, cfg.get("depth_ratio", 0.85))
-            self._add("jag_ratio", "断面锯齿", 0.05, 0.90, cfg.get("jag_ratio", 0.42))
-            self._add("crack_ratio", "延伸裂纹", 0.0, 0.90, cfg.get("crack_ratio", 0.35))
+            self._add("strength", "崩缺强度", 0.0, 1.0, cfg.get("strength", 0.60))
+            self._add("count", "崩缺数", 1, 12, cfg.get("count", 1), integer=True)
+            self._add("size_ratio", "崩缺长度", 0.03, 0.60, cfg.get("size_ratio", 0.22))
+            self._add("depth_ratio", "崩缺深度", 0.05, 0.80, cfg.get("depth_ratio", 0.30))
+            self._add("jag_ratio", "崩口锯齿", 0.05, 0.90, cfg.get("jag_ratio", 0.45))
+            self._add("corner_bias", "转角倾向", 0.0, 1.0, cfg.get("corner_bias", 0.35))
+            self._add("crack_ratio", "延伸裂纹", 0.0, 0.90, cfg.get("crack_ratio", 0.30))
+        elif kind == "dot":
+            self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
+            self._add("count", "黑点数", 1, 120, cfg.get("count", 6), integer=True)
+            self._add("size_ratio", "黑点大小", 0.002, 0.06, cfg.get("size_ratio", 0.010))
+            self._add("darkness", "黑度", 0.2, 1.0, cfg.get("darkness", 0.88))
+            self._add("cluster", "成簇程度", 0.0, 1.0, cfg.get("cluster", 0.35))
+        elif kind == "pit":
+            self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
+            self._add("count", "凹坑数", 1, 120, cfg.get("count", 8), integer=True)
+            self._add("size_ratio", "凹坑大小", 0.003, 0.08, cfg.get("size_ratio", 0.011))
+            self._add("depth", "凹陷深度", 0.05, 1.0, cfg.get("depth", 0.55))
+            self._add("highlight", "坑内高光", 0.0, 1.5, cfg.get("highlight", 0.55))
+            self._add("light_deg", "光照方向", 0, 360,
+                      cfg.get("light_deg", 135.0), step=1)
+        elif kind == "debris":
+            self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
+            self._add("count", "异物数", 1, 40, cfg.get("count", 4), integer=True)
+            self._add("size_ratio", "异物大小", 0.004, 0.10, cfg.get("size_ratio", 0.013))
+            self._add("shadow", "投影强度", 0.0, 1.0, cfg.get("shadow", 0.45))
+            self._add("gloss", "高光", 0.0, 1.5, cfg.get("gloss", 0.35))
+            self._add("fiber_ratio", "纤维状比例", 0.0, 1.0, cfg.get("fiber_ratio", 0.35))
+            cb = QComboBox()
+            for k, txt in [("auto", "自动"), ("dark", "深色颗粒"),
+                           ("light", "浅色碎屑"), ("metal", "金属屑"),
+                           ("fiber", "纤维/毛发")]:
+                cb.addItem(txt, k)
+            cb.setCurrentIndex(max(0, cb.findData(cfg.get("color_mode", "auto"))))
+            cb.currentIndexChanged.connect(self._emit)
+            self.combos["color_mode"] = cb
+            self._items.append(self._labeled("异物类型", cb))
 
         self._relayout()
         self.enable.toggled.connect(self._sync_enable)

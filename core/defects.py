@@ -518,6 +518,144 @@ class ScratchDefect(BaseDefect):
 # ==========================================================================
 # 2. 脏污
 # ==========================================================================
+def _smoothstep(x: np.ndarray) -> np.ndarray:
+    """smoothstep：一阶导在两端为 0，梯度变化平缓，不会出现生硬的折角。"""
+    t = clip01(x)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _soft_blob_field(shape: Tuple[int, int], cx: float, cy: float, rad: float,
+                     ang: float, stretch: float, rng: "Rng",
+                     edge_soft: float = 0.6, irregular: float = 1.0,
+                     grad_cells: Optional[int] = None) -> np.ndarray:
+    """构造「软边斑块场」：中心接近 1，经**空间上真实存在的过渡带**衰减到 0。
+
+    为什么不用旧的「模糊 + 全局阈值」：
+    阈值 ``clip01((mask-thr)/(1-thr))`` 会把所有低于 thr 的像素直接归零，
+    等于在 thr 处切出一圈**阶跃边界**——绘制区域越大，斑块越大，
+    这圈硬边越显眼。这里改为纯空间域的径向衰减：
+    ``alpha = smoothstep((1 - d) / band)``，band 由 ``edge_soft`` 控制，
+    外缘的 alpha 本身就很低（<0.1），肉眼几乎看不出边界。
+
+    edge_soft : 0=边界清晰（过渡带窄） … 1=几乎无边界（过渡带很宽）
+    irregular : 分形噪声对边界的扰动强度（越大越不规则）
+    """
+    h, w = int(shape[0]), int(shape[1])
+    rad = max(float(rad), 1e-3)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx, dy = xx - cx, yy - cy
+    ca, sa = math.cos(ang), math.sin(ang)
+    rx = dx * ca + dy * sa
+    ry = -dx * sa + dy * ca
+    d = np.sqrt((rx / max(stretch, 1e-3)) ** 2 + ry ** 2) / rad      # 归一化距离
+
+    # 过渡带宽度：edge_soft 越大，带越宽 → 边界感越弱
+    es = float(np.clip(edge_soft, 0.0, 1.0))
+    band = 0.06 + 0.94 * (es ** 1.4)
+    field = _smoothstep((1.0 - d) / max(band, 1e-3))
+
+    if irregular > 1e-3:
+        # 分形噪声扰动半径：让边界不规则（而不是一个规整椭圆）
+        cells = grad_cells or max(3, int(min(h, w) / max(rad, 1.0) * 2.2))
+        n = fractal_noise((h, w), rng, base_cells=max(2, cells),
+                          octaves=4, persistence=0.55)
+        # 噪声在过渡带内权重最大：实心区保持干净，边界才毛糙
+        rim_w = np.clip(1.0 - np.abs(d - (1.0 - band * 0.5)) / max(band * 1.4, 1e-3), 0, 1)
+        field = clip01(field * (1.0 - 0.30 * irregular)
+                       + field * n * (0.62 * irregular) * rim_w
+                       + 0.22 * irregular * rim_w * (n - 0.5) * 2.0 * 0.5)
+    return clip01(field)
+
+
+def _radius_for_coverage(coverage: float, base_short: float, stretch: float,
+                         scale: float, frame_area: float,
+                         k: float = 0.78) -> float:
+    """按目标覆盖率反推斑块半径（避免用阈值硬切面积）。
+
+    alpha>0.5 的等效面积 ≈ π·rad²·stretch·k（k 计入软边造成的内缩）。
+    """
+    cov = float(np.clip(coverage, 0.0005, 0.9))
+    area = max(cov * max(frame_area, 1.0), 4.0)
+    return max(2.0, math.sqrt(area / max(math.pi * max(stretch, 1.0) * k, 1e-3)))
+
+
+def _region_inset(region: np.ndarray) -> np.ndarray:
+    """区域内部到边界的距离场（0 = 边界，向内递增）。"""
+    try:
+        import cv2
+        m = (np.asarray(region, np.float32) > 0.5).astype(np.uint8)
+        if m.max() <= 0:
+            return np.zeros_like(m, np.float32)
+        return cv2.distanceTransform(m, cv2.DIST_L2, 5).astype(np.float32)
+    except Exception:
+        return (np.asarray(region, np.float32) > 0.5).astype(np.float32)
+
+
+def _fit_blob_in_region(region: np.ndarray, rng: "Rng",
+                        want_rad: float, stretch: float) -> Tuple[float, float, float]:
+    """在手绘区域内挑一个「离边界足够远」的斑块中心，并返回 (cx, cy, rad)。
+
+    目的：避免大斑块被手绘区域边界**笔直切开**——那条直线正是
+    「区域画得越大、边界感越明显」的主要来源。
+    做法：只在「到边界距离 ≥ 0.75·rad」的像素里采样；若区域内没有
+    这么深的点，就自动把半径压到区域内最大内切深度，缺陷仍能生成。
+    """
+    inset = _region_inset(region)
+    rad = float(max(want_rad, 2.0))
+    need = 0.75 * rad
+    ys, xs = np.nonzero(inset >= need)
+    if xs.size >= 8:
+        i = rng.randint(0, int(xs.size) - 1)
+        return float(xs[i]), float(ys[i]), rad
+    deep = float(inset.max())
+    if deep <= 2.0:                       # 区域太薄，退回普通采样
+        cx, cy = sample_point(region, rng, margin=0.04)
+        return cx, cy, max(2.0, min(rad, deep))
+    rad = min(rad, deep / 0.75)            # 压到刚好放得下
+    need = 0.75 * rad
+    ys, xs = np.nonzero(inset >= need)
+    if xs.size < 4:
+        cx, cy = sample_point(region, rng, margin=0.04)
+        return cx, cy, max(2.0, rad)
+    i = rng.randint(0, int(xs.size) - 1)
+    return float(xs[i]), float(ys[i]), rad
+
+
+def _feather_width_for(region: np.ndarray, h: int, w: int) -> float:
+    """区域向内羽化的像素宽度。
+
+    ⚠️ 必须相对**区域自身**尺寸来定，不能相对整幅图：
+    增强模式给每个缺陷的是一个「局部小椭圆」（半径可能只有二三十像素），
+    若按 ``0.06*min(h,w)``（上千像素的图就是 ~28px）去腐蚀，
+    小椭圆会被**整个抹掉**，缺陷一个都生成不出来。
+    """
+    short = _bbox_short_side(region) if region is not None else 0.0
+    if short <= 0:
+        return 0.0
+    return float(np.clip(0.10 * short, 1.5, 10.0))
+
+
+def _feather_region(region: np.ndarray, width: float) -> np.ndarray:
+    """把手绘区域掩膜**向内**羽化：区域边界处为 0，内部渐增到 1。
+
+    作用：``mask * feathered`` 在区域外严格为 0（不越界），
+    但不会在区域边界留下一条笔直的硬切痕；越靠近边界 alpha 越低，
+    视觉上自然消失。
+    """
+    if width <= 0.4:
+        return clip01(region)
+    try:
+        import cv2
+        m = (np.asarray(region, np.float32) > 0.5).astype(np.uint8)
+        if m.max() <= 0:
+            return np.zeros_like(m, np.float32)
+        k = max(1, int(round(width)))
+        er = cv2.erode(m, np.ones((2 * k + 1, 2 * k + 1), np.uint8))
+        f = cv2.GaussianBlur(er.astype(np.float32), (0, 0), max(0.8, width * 0.55))
+        return clip01(f * clip01(region))
+    except Exception:
+        return clip01(region)
+
 @dataclass
 class SmudgeParams:
     blob_count: int = 1             # 斑块数量
@@ -547,8 +685,10 @@ class SmudgeDefect(BaseDefect):
         s = self.strength
         sv = self.severity_mult
         short = min(h, w)
+        frame_area = float(h * w)
         if region is not None:
             short = int(max(np.sqrt(max((region > 0.5).sum(), 1.0)) * 1.6, 24))
+            frame_area = float(max((region > 0.5).sum(), 1.0))
 
         blob_count = max(1, int(self.params.get("blob_count", 1)))
         blob_scale = self.params.get("blob_scale", 0.30) * (0.55 + 0.45 * sv)
@@ -556,56 +696,49 @@ class SmudgeDefect(BaseDefect):
                                 * (0.30 + 0.70 * sv), 0.0, 0.95))
         granular = self.params.get("granular", 0.35) * (0.4 + s) * (0.5 + 0.5 * sv)
         speckle = self.params.get("speckle", True)
-        edge_soft = float(self.params.get("edge_soft", 1.0))
+        # edge_soft 归一到 0~1：0=边界清晰，1=几乎看不出边界（默认偏软）
+        edge_soft = float(np.clip(self.params.get("edge_soft", 1.0) / 2.5, 0.0, 1.0))
+        # 覆盖率不再用「全局阈值」实现（阈值会切出可见硬边），
+        # 改为按目标覆盖率反推每个斑块的半径。
+        cov = float(np.clip(self.params.get("coverage", 0.35) * (0.6 + 0.9 * s)
+                            * (0.5 + 0.5 * sv), 0.02, 0.85))
 
         mask = np.zeros((h, w), dtype=np.float32)
         radii = []
-        for _ in range(blob_count):
+        # 区域向内羽化：避免斑块被手绘区域的直边「切」出一条硬边
+        reg_f = (_feather_region(region, _feather_width_for(region, h, w))
+                 if region is not None else None)
+        for i in range(blob_count):
+            ang = rng.uniform(0, np.pi)
+            stretch = rng.uniform(1.0, 2.2)
+            # 多个斑块时每个只占覆盖率的一部分
+            share = cov / float(blob_count)
+            rad = _radius_for_coverage(share, short, stretch, blob_scale, frame_area)
+            # 斑块尺寸滑条仍作为「相对倍率」生效，但限制在合理范围内，
+            # 避免在大区域上把单个斑块撑得过大
+            rad *= float(np.clip(blob_scale / 0.30, 0.35, 2.2))
+            rad = float(np.clip(rad, 3.0, max(6.0, short * 0.9)))
             if region is not None:
-                cx, cy = sample_point(region, rng, margin=0.04)
+                cx, cy, rad = _fit_blob_in_region(region, rng, rad, stretch)
             else:
                 cx = rng.uniform(0.08 * w, 0.92 * w)
                 cy = rng.uniform(0.08 * h, 0.92 * h)
-            rad = short * blob_scale * rng.uniform(0.45, 1.25)
             radii.append(rad)
-            # 各向异性：脏污常沿某个方向拉长
-            ang = rng.uniform(0, np.pi)
-            stretch = rng.uniform(1.0, 2.2)
-            yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-            dx, dy = xx - cx, yy - cy
-            rx = dx * np.cos(ang) + dy * np.sin(ang)
-            ry = -dx * np.sin(ang) + dy * np.cos(ang)
-            d = np.sqrt((rx / stretch) ** 2 + ry ** 2)
-            base = np.clip((rad - d) / max(rad, 1e-6), 0.0, 1.0)
-
-            # 用噪声把圆形斑块打碎成不规则形状
-            cells = max(3, int(short / max(rad, 1.0) * 2.2))
-            n = fractal_noise((h, w), rng, base_cells=cells, octaves=4,
-                              persistence=0.58)
-            blob = clip01(base * (0.35 + 1.30 * n) * rng.uniform(0.75, 1.15))
+            blob = _soft_blob_field((h, w), cx, cy, rad, ang, stretch, rng,
+                                    edge_soft=edge_soft,
+                                    irregular=float(np.clip(0.35 + 0.5 * blob_scale
+                                                           + 0.35 * s, 0.0, 1.3)))
             mask = np.maximum(mask, blob)
 
-        # 边缘柔化：先高斯模糊把硬边化成渐变带，再做覆盖率阈值。
-        # 顺序很关键：若先阈值后模糊，软晕会吃掉明显度差异（模糊把面积重新撑大），
-        # 且必须保证「模糊在前、区域裁剪在后」，否则边缘会溢出产品表面。
-        rad_avg = float(np.mean(radii)) if radii else float(short * blob_scale)
-        sigma = max(2.0, rad_avg * 0.12 * edge_soft)
-        mask = blur_mask(mask, sigma)
-
-        # 全局阈值化，控制实际覆盖率
-        cov = float(np.clip(self.params.get("coverage", 0.35) * (0.6 + 0.9 * s)
-                            * (0.5 + 0.5 * sv), 0.02, 0.85))
-        thr = float(np.quantile(mask, 1.0 - cov)) if mask.max() > 0 else 1.0
-        mask = clip01((mask - thr) / max(1.0 - thr, 1e-6))
-
         if speckle:
-            sp = self._speckle((h, w), rng, short, density=0.35 * (0.5 + s) * (0.4 + 0.6 * sv),
+            sp = self._speckle((h, w), rng, short,
+                               density=0.35 * (0.5 + s) * (0.4 + 0.6 * sv),
                                region=region)
-            # 飞溅点同样轻微模糊，避免出现一颗颗硬边小圆
-            mask = np.maximum(mask, blur_mask(sp, max(0.8, sigma * 0.30)) * 0.75)
-        # 区域约束：污渍只留在目标表面
-        if region is not None:
-            mask = mask * clip01(region)
+            rad_avg = float(np.mean(radii)) if radii else float(short * blob_scale)
+            mask = np.maximum(mask, blur_mask(sp, max(0.8, rad_avg * 0.08)))
+        # 区域约束：污渍只留在目标表面（用羽化后的区域，边界处自然消失）
+        if reg_f is not None:
+            mask = mask * reg_f
         mask = np.clip(mask, 0.0, 1.0)
         if mask.max() <= 0:
             return DefectResult(image=rgb.copy(), mask=mask, kind=self.kind, count=0)
@@ -742,51 +875,42 @@ class DiscolorDefect(BaseDefect):
 
         region_count = max(1, int(self.params.get("region_count", 1)))
         region_scale = self.params.get("region_scale", 0.35) * (0.55 + 0.45 * sv)
-        edge_soft = float(np.clip(self.params.get("edge_soft", 0.45), 0.05, 1.0))
-        edge_blur = float(self.params.get("edge_blur", 1.0))
+        # edge_soft 直接作为「边界感」：0=边界清晰 … 1=几乎无边界
+        edge_soft = float(np.clip(self.params.get("edge_soft", 0.75), 0.0, 1.0))
+        # 覆盖率用于反推半径（不再用全局阈值硬切，避免可见等值线）
+        cov = float(np.clip(0.06 + 0.30 * s, 0.02, 0.6))
+        frame_area = float(h * w)
+        if region is not None:
+            frame_area = float(max((region > 0.5).sum(), 1.0))
 
         mask = np.zeros((h, w), dtype=np.float32)
         radii = []
+        # 区域向内羽化：避免异色块被手绘区域的直边切出硬边
+        reg_f = (_feather_region(region, _feather_width_for(region, h, w))
+                 if region is not None else None)
         for _ in range(region_count):
+            ang = rng.uniform(0, np.pi)
+            stretch = rng.uniform(1.0, 2.4)
+            share = cov / float(region_count)
+            rad = _radius_for_coverage(share, short, stretch, region_scale, frame_area)
+            rad *= float(np.clip(region_scale / 0.35, 0.35, 2.2))
+            rad = float(np.clip(rad, 4.0, max(8.0, short * 0.95)))
             if region is not None:
-                cx, cy = sample_point(region, rng, margin=0.05)
+                cx, cy, rad = _fit_blob_in_region(region, rng, rad, stretch)
             else:
                 cx = rng.uniform(0.10 * w, 0.90 * w)
                 cy = rng.uniform(0.10 * h, 0.90 * h)
-            rad = short * region_scale * rng.uniform(0.5, 1.3)
             radii.append(rad)
-            ang = rng.uniform(0, np.pi)
-            stretch = rng.uniform(1.0, 2.4)
-            yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-            dx, dy = xx - cx, yy - cy
-            rx = dx * np.cos(ang) + dy * np.sin(ang)
-            ry = -dx * np.sin(ang) + dy * np.cos(ang)
-            d = np.sqrt((rx / stretch) ** 2 + ry ** 2)
-            base = np.clip((rad - d) / max(rad * edge_soft, 1e-6), 0.0, 1.0)
-
-            # 不规则边界
-            cells = max(3, int(short / max(rad, 1.0) * 1.8))
-            n = fractal_noise((h, w), rng, base_cells=cells, octaves=4, persistence=0.55)
-            blob = clip01(base * (0.45 + 1.05 * n) * rng.uniform(0.8, 1.1))
+            blob = _soft_blob_field((h, w), cx, cy, rad, ang, stretch, rng,
+                                    edge_soft=edge_soft,
+                                    irregular=float(np.clip(0.30 + 0.45 * region_scale
+                                                           + 0.30 * s, 0.0, 1.2)))
             mask = np.maximum(mask, blob)
 
         mask = clip01(mask)
-
-        # 边缘柔化：先高斯模糊把硬边化成渐变带，再做覆盖率上限控制。
-        # 顺序很重要——先模糊后阈值，既保住柔软边缘，又不会让软晕把明显度差异冲淡；
-        # 「区域裁剪」必须放在最后，否则模糊的晕会溢出产品表面。
-        rad_avg = float(np.mean(radii)) if radii else float(short * region_scale)
-        mask = blur_mask(mask, max(2.5, rad_avg * 0.16 * edge_blur))
-
-        # 覆盖率上限控制：只在超调时收缩（阈值低于零时掩膜保持不变）
-        cov = float(np.clip(0.06 + 0.30 * s, 0.02, 0.6))
-        thr = float(np.quantile(mask, 1.0 - cov))
-        if thr > 0:
-            mask = clip01((mask - thr) / max(1.0 - thr, 1e-6))
-
-        # 区域约束：异色只留在目标表面
-        if region is not None:
-            mask = mask * clip01(region)
+        # 区域约束：异色只留在目标表面（羽化后边界处自然消失，且严格不越界）
+        if reg_f is not None:
+            mask = mask * reg_f
         if mask.max() <= 0:
             return DefectResult(image=rgb.copy(), mask=mask, kind=self.kind, count=0)
 
@@ -835,277 +959,270 @@ class DiscolorDefect(BaseDefect):
 
 
 # ==========================================================================
-# 4. 缺角（崩边 / 掉角）
+# 4. 崩缺（边沿崩缺 / 缺损）
 # ==========================================================================
 @dataclass
 class ChipParams:
-    count: int = 1                 # 缺角个数
-    size_ratio: float = 0.40       # 缺角尺寸相对产品短边的比例
-    jag_ratio: float = 0.42        # 断面边缘的锯齿/崩口程度
-    depth_ratio: float = 0.85      # 崩口深度（相对缺角尺寸）
-    rim_width: float = 2.2         # 断面亮边宽度（像素）
-    crack_ratio: float = 0.35      # 从缺角延伸出的裂纹长度比
-    grain: float = 0.42            # 断面颗粒感
-    darkness: float = 0.34         # 崩口内壁变暗程度
+    count: int = 1                 # 崩缺个数
+    size_ratio: float = 0.22       # 崩缺「沿边沿」长度相对产品短边的比例
+    jag_ratio: float = 0.45        # 断口边缘的锯齿/崩缺程度
+    depth_ratio: float = 0.30      # 崩缺深度相对局部半厚度（浅！实际崩缺很浅）
+    rim_width: float = 2.0         # 断口内侧暗边宽度（像素）
+    crack_ratio: float = 0.30      # 从崩缺延伸出的裂纹长度比
+    grain: float = 0.45            # 断面颗粒感
+    darkness: float = 0.32         # 崩缺内壁变暗程度
     debris: bool = True            # 是否产生细小碎屑
+    corner_bias: float = 0.35      # 落在转角处的概率（转角更易磕碰）
 
 
 class ChipDefect(BaseDefect):
-    """缺角：产品边角被磕碰掉一块，露出粗糙断面。
+    """崩缺：产品**边沿**被磕掉一小块（实际缺陷多为边沿浅层缺损，而非整角崩落）。
 
     物理表现：
-    1. 轮廓缺口 —— 以角点为圆心、沿边界内切的不规则多边形把产品"啃掉"一块；
-    2. 新断面 —— 粗糙陶瓷颗粒感，比原表面更亮（新鲜断面反光更强）且更粗糙；
-    3. 断面与原表面交界处有一圈细微暗边（凹凸处的阴影/污染）；
-    4. 缺角外侧（背景侧）有细小碎屑；
-    5. 可选从缺角顶点延伸出短裂纹。
+    1. 位置 —— 沿产品轮廓**任意位置**取点（转角处概率更高），不再是「只啃角点」；
+    2. 形状 —— 沿边沿呈月牙状浅缺口：跨度沿切向、深度沿内法线，
+       深度受**局部半厚度**约束（浅缺损不会贯穿产品）；
+    3. 断面 —— 新鲜断面略亮、粗糙（陶瓷颗粒感），带多频角向抖动形成崩口锯齿；
+    4. 交界 —— 原轮廓线上有一圈细微暗边（材料崩落后的阴影）；
+    5. 碎屑 —— 缺口外侧（背景侧）散落细小崩渣；
+    6. 可选 —— 自缺口向内延伸短裂纹。
     """
 
     kind = "chip"
 
     def render(self, rgb: np.ndarray, rng: Rng,
                region: Optional[np.ndarray] = None, hint=None) -> DefectResult:
+        import cv2
+
         h, w = rgb.shape[:2]
         s = self.strength
         sv = self.severity_mult
         base = rgb.astype(np.float32) / 255.0
 
-        reg = region if region is not None else np.ones((h, w), np.float32)
-        ys, xs = np.nonzero(reg > 0.5)
-        if len(xs) < 64:
+        reg = clip01(region) if region is not None else np.ones((h, w), np.float32)
+        binm = (reg > 0.5).astype(np.uint8)
+        if int(binm.sum()) < 64:
             return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
                                 kind=self.kind, count=0)
 
-        x0, x1 = int(xs.min()), int(xs.max())
-        y0, y1 = int(ys.min()), int(ys.max())
-        prod_short = float(min(x1 - x0 + 1, y1 - y0 + 1))
-        if prod_short < 12:
+        # ---- 距离场：0 在轮廓上，向内递增；梯度方向即「内法线」 ----
+        dt = cv2.distanceTransform(binm, cv2.DIST_L2, 5).astype(np.float32)
+        gy, gx = np.gradient(dt)
+        gn = np.hypot(gx, gy)
+        inside = binm > 0
+        if not inside.any():
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        # 局部半厚度：崩缺深度以它为基准，保证「浅」且不会贯穿
+        half_t = float(np.percentile(dt[inside], 90.0))
+        if half_t < 2.0:
+            half_t = 2.0
+        prod_short = float(max(math.sqrt(float(binm.sum())), 12.0))
+
+        # ---- 候选落点：轮廓上的像素 ----
+        cnts, _ = cv2.findContours(binm, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not cnts:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        bpts = np.vstack(cnts).reshape(-1, 2).astype(np.float32)
+        if bpts.shape[0] < 8:
             return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
                                 kind=self.kind, count=0)
 
         count = max(1, int(self.params.get("count", 1)))
-        size_ratio = self.params.get("size_ratio", 0.40) * (0.5 + 0.6 * s) * (0.55 + 0.45 * sv)
-        radius = max(3.0, prod_short * size_ratio * 0.34)
-        jag = self.params.get("jag_ratio", 0.42)
-        depth = self.params.get("depth_ratio", 0.85)
+        size_ratio = float(self.params.get("size_ratio", 0.22)) \
+            * (0.55 + 0.55 * s) * (0.6 + 0.4 * sv)
+        jag = float(self.params.get("jag_ratio", 0.45))
+        depth_ratio = float(self.params.get("depth_ratio", 0.30)) \
+            * (0.5 + 0.7 * s) * (0.6 + 0.4 * sv)
+        corner_bias = float(np.clip(self.params.get("corner_bias", 0.35), 0.0, 1.0))
 
         mask = np.zeros((h, w), dtype=np.float32)
         out = base.copy()
         n_made = 0
         yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        used: List[Tuple[float, float, float]] = []   # (cx, cy, 半径) 避免叠在一起
 
         for _ in range(count):
-            corner = self._pick_corner(reg, rng, exclude=None)
-            if corner is None:
+            # 落点：默认按曲率（凸角）加权；给了 hint 就优先选**离锚点最近**的一段边沿
+            idx = self._pick_edge_point(bpts, rng, corner_bias, hint)
+            if idx is None:
                 break
-            cx, cy, ox, oy = corner
+            cx, cy = float(bpts[idx, 0]), float(bpts[idx, 1])
 
-            # ---- 缺角几何：沿角点切掉一块（半平面断面） ----
-            # n_in: 由角点指向产品内部的内法线；tan: 沿断面的走向
-            n_in = np.array([-ox, -oy], np.float32)
+            # 该点的内法线（距离场梯度方向）
+            ix = int(np.clip(cx, 0, w - 1))
+            iy = int(np.clip(cy, 0, h - 1))
+            nx, ny = float(gx[iy, ix]), float(gy[iy, ix])
+            nrm = math.hypot(nx, ny)
+            if nrm < 1e-3:
+                continue
+            n_in = np.array([nx / nrm, ny / nrm], np.float32)     # 指向产品内部
             tan = np.array([-n_in[1], n_in[0]], np.float32)
-            dd = (xx - cx) * n_in[0] + (yy - cy) * n_in[1]   # 深度（沿内法线）
-            tt = (xx - cx) * tan[0] + (yy - cy) * tan[1]     # 横向（沿断面）
 
-            half = radius * rng.uniform(1.05, 1.75)             # 断面半宽
-            depth_len = half * float(np.clip(depth, 0.35, 1.5)) * rng.uniform(0.8, 1.3)
+            # 缺口尺寸：跨度沿边沿（较明显），深度浅（受局部半厚度限制）
+            half = max(2.0, prod_short * float(np.clip(size_ratio, 0.02, 0.6))
+                       * rng.uniform(0.7, 1.35))
+            local_t = max(2.0, float(dt[iy, ix]) + half * 0.5)
+            depth_len = float(np.clip(half * depth_ratio * rng.uniform(0.7, 1.3),
+                                      1.2, local_t * 0.75))
 
-            # 断面线：多频角向抖动 + 分形噪声 → 贝壳状不规则崩口
-            th = np.arctan2(tt, np.maximum(dd, 1e-3))
-            wob = (np.sin(th * rng.uniform(2.0, 3.5) + rng.uniform(0, 6.28)) * 0.55
-                   + np.sin(th * rng.uniform(5.0, 8.5) + rng.uniform(0, 6.28)) * 0.30
-                   + np.sin(th * rng.uniform(11.0, 16.0) + rng.uniform(0, 6.28)) * 0.15)
-            edge_noise = fractal_noise((h, w), rng, base_cells=max(3, int(radius * 0.9)),
-                                       octaves=4, persistence=0.62)
-            cut = depth_len * (1.0 + jag * wob * 0.42
-                               + jag * (edge_noise - 0.5) * 0.90)
-
-            # 横向收口：中间深、两端尖（角被磕掉的典型形状）
-            span = clip01(1.0 - np.abs(tt) / max(half, 1e-6))
-            span = clip01(span * (0.5 + 0.5 * span))
-
-            bite = clip01((cut - dd) / max(0.18, jag * 0.30 + 0.12))
-            bite = clip01(bite * (0.30 + 0.90 * span))
-            bite = clip01(bite * clip01(reg))     # 缺口必须在产品轮廓内侧
-            if bite.max() <= 0.05 or float((bite > 0.5).sum()) < 12:
+            # 与已生成的缺口保持距离
+            if any(math.hypot(cx - ux, cy - uy) < (half + ur) * 0.85
+                   for ux, uy, ur in used):
                 continue
 
-            depth_w = clip01(1.0 - dd / max(float(np.percentile(cut, 99.5)), 1e-6))
-            chip = bite
+            dd = (xx - cx) * n_in[0] + (yy - cy) * n_in[1]   # 沿内法线（向内为正）
+            tt = (xx - cx) * tan[0] + (yy - cy) * tan[1]     # 沿边沿
+
+            # 横向剖面：中间最深、两端收口成尖（典型崩口形状）
+            span = clip01(1.0 - (tt / max(half, 1e-6)) ** 2)
+            span = span * span * (3.0 - 2.0 * span)          # smoothstep，收口更自然
+
+            # 深度轮廓：多频抖动 + 分形噪声 → 崩口参差不齐
+            ph = rng.uniform(0, 6.283)
+            wob = (np.sin(tt / max(half, 1e-6) * rng.uniform(2.0, 3.6) + ph) * 0.55
+                   + np.sin(tt / max(half, 1e-6) * rng.uniform(5.0, 9.0) + ph * 1.7) * 0.30
+                   + np.sin(tt / max(half, 1e-6) * rng.uniform(11.0, 17.0) + ph * 0.6) * 0.15)
+            enoise = fractal_noise((h, w), rng, base_cells=max(4, int(half * 0.9)),
+                                   octaves=4, persistence=0.62)
+            reach = depth_len * (1.0 + jag * wob * 0.34
+                                 + jag * (enoise - 0.5) * 0.85)
+            reach = np.maximum(reach, 0.8)
+
+            # 缺口本体：从轮廓向内啃进 reach 处
+            soft = max(0.9, depth_len * 0.22)
+            bite = clip01((reach - dd) / soft) * span
+            bite = clip01(bite) * clip01(reg)
+            if bite.max() <= 0.06 or int((bite > 0.5).sum()) < 10:
+                continue
+            used.append((cx, cy, half))
             n_made += 1
 
-            # ---- 断面材质：略亮、粗糙（新鲜断口的陶瓷颗粒） ----
-            grain = fractal_noise((h, w), rng, base_cells=max(6, int(radius * 1.2)),
-                                  octaves=4, persistence=0.62)
-            grain_amt = self.params.get("grain", 0.42) * (0.4 + 0.7 * s) * (0.4 + 0.6 * sv)
+            # ---- 断面材质：略亮、粗糙的新鲜断口 ----
+            depth_w = clip01(1.0 - dd / max(float(np.percentile(reach, 99.0)), 1e-6))
             lum = out.mean(axis=2, keepdims=True)
-            # 断面只比原表面略亮（+4%~12%），主要靠粗糙感而非亮度区分
-            fracture = clip01(lum * rng.uniform(1.04, 1.12)
-                              + (grain - 0.5)[:, :, None] * grain_amt * 0.42)
-            # 崩口内壁（靠外侧）稍暗，模拟深度阴影
-            dark = self.params.get("darkness", 0.34) * (0.4 + 0.8 * s) * (0.4 + 0.6 * sv)
-            fracture = clip01(fracture - dark * depth_w[:, :, None] * 0.30)
-            # 断面少量色偏（露出未烧结体，偏灰褐）
-            tint = np.array([1.01, 0.995, 0.965], np.float32)
-            fracture = clip01(fracture * tint[None, None, :])
-
-            a_chip = chip[:, :, None]
+            grain_amt = float(self.params.get("grain", 0.45)) * (0.4 + 0.7 * s) * (0.4 + 0.6 * sv)
+            grain = fractal_noise((h, w), rng, base_cells=max(6, int(half * 1.1)),
+                                  octaves=4, persistence=0.62)
+            # 断口只比原表面略亮（+3%~11%），主要靠粗糙感与暗边区分
+            fracture = clip01(lum * rng.uniform(1.03, 1.11)
+                              + (grain - 0.5)[:, :, None] * grain_amt * 0.45)
+            dark = float(self.params.get("darkness", 0.32)) * (0.4 + 0.8 * s) * (0.4 + 0.6 * sv)
+            fracture = clip01(fracture - dark * depth_w[:, :, None] * 0.34)
+            # 露出未烧结体，断面略偏灰褐
+            fracture = clip01(fracture * np.array([1.012, 0.996, 0.962], np.float32)[None, None, :])
+            a_chip = bite[:, :, None]
             out = out * (1 - a_chip) + fracture * a_chip
 
-            # ---- 交界暗边：断面轮廓内侧一圈暗线 ----
-            rim = np.zeros((h, w), np.float32)
-            try:
-                import cv2
-
-                k = max(1, int(round(self.params.get("rim_width", 2.2))))
-                dil = cv2.dilate((chip > 0.5).astype(np.uint8),
-                                 np.ones((3, 3), np.uint8), iterations=max(1, k // 2))
-                inner = (cv2.dilate((chip > 0.5).astype(np.uint8),
-                                    np.ones((3, 3), np.uint8), iterations=k) - dil)
-                rim = clip01(inner.astype(np.float32))
-            except Exception:
-                rim = clip01(chip - clip01(bite * 0.82))
-            rim = rim * (1.0 - chip * 0.35)
+            # ---- 交界暗边：原轮廓线内侧一圈暗线（崩落后的阴影） ----
+            k = max(1, int(round(float(self.params.get("rim_width", 2.0)))))
+            solid = (bite > 0.5).astype(np.uint8)
+            k3 = np.ones((3, 3), np.uint8)
+            grown = cv2.dilate(solid, k3, iterations=k)
+            rim = clip01((grown - solid).astype(np.float32)) * (1.0 - bite * 0.5)
             rim = clip01(rim) * clip01(reg)
-            out = clip01(out * (1.0 - 0.45 * rim[:, :, None]))
+            out = clip01(out * (1.0 - 0.42 * rim[:, :, None]))
 
-            # ---- 断口外侧（背景侧）碎屑 ----
+            # ---- 缺口外侧（背景侧）的细小崩渣 ----
             if self.params.get("debris", True):
-                debris = np.zeros((h, w), np.float32)
-                for _ in range(rng.randint(3, 8)):
+                deb = np.zeros((h, w), np.float32)
+                for _k in range(rng.randint(2, 6)):
                     a = rng.uniform(0, math.pi * 2)
-                    rr = radius * rng.uniform(0.9, 2.0)
-                    # 沿断面向外散落
-                    dcx = cx + ox * rr * 0.35 + tan[0] * math.cos(a) * rr \
-                        + n_in[0] * math.sin(a) * rr * 0.5
-                    dcy = cy + oy * rr * 0.35 + tan[1] * math.cos(a) * rr \
-                        + n_in[1] * math.sin(a) * rr * 0.5
-                    r = max(0.6, radius * rng.uniform(0.015, 0.05))
-                    # 碎屑用小的不规则团块而不是正圆
-                    dm = filled_circle_mask((h, w), dcx, dcy, r, feather=0.6)
+                    rr = half * rng.uniform(0.25, 0.95)
+                    dcx = cx - n_in[0] * rr * rng.uniform(0.1, 0.6) \
+                        + tan[0] * math.cos(a) * rr * 0.7
+                    dcy = cy - n_in[1] * rr * rng.uniform(0.1, 0.6) \
+                        + tan[1] * math.cos(a) * rr * 0.7
+                    r = max(0.5, half * rng.uniform(0.012, 0.042))
+                    dm2 = filled_circle_mask((h, w), dcx, dcy, r, feather=0.6)
                     dn = fractal_noise((h, w), rng, base_cells=max(8, int(r * 6) + 8),
                                        octaves=2, persistence=0.5)
-                    dm = clip01(dm * (0.35 + 1.5 * (dn > 0.55)))
-                    debris = np.maximum(debris, dm)
-                # 碎屑不计入缺陷掩膜（不是产品缺陷本身），但要画到图上
-                dmask = clip01(debris) * (1.0 - clip01(reg))
-                dcol = np.array([0.72, 0.70, 0.66], np.float32)
-                out = clip01(out * (1 - dmask[:, :, None] * 0.85)
-                             + dcol[None, None, :] * dmask[:, :, None] * 0.85)
+                    deb = np.maximum(deb, clip01(dm2 * (0.35 + 1.5 * (dn > 0.55))))
+                dmask = clip01(deb) * (1.0 - clip01(reg))
+                dcol = np.array([0.74, 0.72, 0.68], np.float32)
+                out = clip01(out * (1 - dmask[:, :, None] * 0.8)
+                             + dcol[None, None, :] * dmask[:, :, None] * 0.8)
 
-            # ---- 可选：从缺角延伸短裂纹（沿断面走向向内延伸） ----
-            cr = self.params.get("crack_ratio", 0.35) * (0.3 + 0.9 * s) * (0.4 + 0.6 * sv)
+            # ---- 自缺口向内延伸的短裂纹 ----
+            cr = float(self.params.get("crack_ratio", 0.30)) * (0.3 + 0.9 * s) * (0.4 + 0.6 * sv)
             if cr > 0.02:
                 from .utils import polyline_mask
 
-                clen = radius * rng.uniform(1.2, 2.8) * cr
-                side = rng.choice([-1.0, 1.0])
-                # 起点在断面中部，方向斜向产品内部
-                sx = cx + n_in[0] * depth_len * 0.55 + tan[0] * side * half * 0.35
-                sy = cy + n_in[1] * depth_len * 0.55 + tan[1] * side * half * 0.35
-                a_dir = math.atan2(n_in[1], n_in[0]) + side * rng.uniform(0.35, 0.95)
+                clen = half * rng.uniform(1.0, 2.4) * cr
+                side = float(rng.choice([-1.0, 1.0]))
+                sx = cx + n_in[0] * depth_len * 0.75 + tan[0] * side * half * 0.28
+                sy = cy + n_in[1] * depth_len * 0.75 + tan[1] * side * half * 0.28
+                a_dir = math.atan2(n_in[1], n_in[0]) + side * rng.uniform(0.30, 0.85)
                 p0 = (sx, sy)
-                p1 = (sx + math.cos(a_dir) * clen * 0.4 + tan[0] * side * clen * 0.22,
-                      sy + math.sin(a_dir) * clen * 0.4 + tan[1] * side * clen * 0.22)
-                p2 = (sx + math.cos(a_dir) * clen * 0.75 - tan[0] * side * clen * 0.12,
-                      sy + math.sin(a_dir) * clen * 0.75 - tan[1] * side * clen * 0.12)
-                p3 = (sx + math.cos(a_dir) * clen,
-                      sy + math.sin(a_dir) * clen)
+                p1 = (sx + math.cos(a_dir) * clen * 0.38 + tan[0] * side * clen * 0.20,
+                      sy + math.sin(a_dir) * clen * 0.38 + tan[1] * side * clen * 0.20)
+                p2 = (sx + math.cos(a_dir) * clen * 0.72 - tan[0] * side * clen * 0.10,
+                      sy + math.sin(a_dir) * clen * 0.72 - tan[1] * side * clen * 0.10)
+                p3 = (sx + math.cos(a_dir) * clen, sy + math.sin(a_dir) * clen)
                 cm = polyline_mask((h, w), [p0, p1, p2, p3],
-                                   width=max(0.6, radius * rng.uniform(0.015, 0.035)),
-                                   taper=[0.9, 0.7, 0.4, 0.05],
-                                   feather=0.7)
+                                   width=max(0.6, half * rng.uniform(0.012, 0.030)),
+                                   taper=[0.9, 0.65, 0.35, 0.04], feather=0.7)
                 cm = clip01(cm) * clip01(reg)
-                out = clip01(out * (1 - 0.42 * cm[:, :, None]))
-                chip = np.maximum(chip, cm)
+                out = clip01(out * (1 - 0.40 * cm[:, :, None]))
+                bite = np.maximum(bite, cm)
 
-            mask = np.maximum(mask, chip)
+            mask = np.maximum(mask, bite)
 
-        mask = clip01(mask) * clip01(reg)
-        if mask.max() <= 0:
-            return DefectResult(image=rgb.copy(), mask=mask, kind=self.kind, count=0)
+        if n_made == 0 or mask.max() <= 0.02:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
 
-        return DefectResult(image=to_u8(out), mask=mask, kind=self.kind, count=n_made)
+        return DefectResult(image=to_u8(out), mask=clip01(mask), kind=self.kind,
+                            count=n_made)
 
-    def _pick_corner(self, reg: np.ndarray, rng: Rng, exclude=None):
-        """在区域轮廓上找一个「凸角」作为缺角位置。
+    @staticmethod
+    def _pick_edge_point(bpts: np.ndarray, rng: Rng, corner_bias: float,
+                         hint=None) -> Optional[int]:
+        """在轮廓点里挑一个落点。
 
-        做法：距离变换找最宽处 → 用凸缺陷（convexity defect）挑角点。
-        这里用更稳的替代方案：沿区域主轴的 4 个斜向极值点，
-        再用局部邻域的凸性做二次筛选。
+        - 给了 ``hint=(ang, ax, ay)``（增强模式传入锚点）：只在**离锚点最近的
+          20%** 轮廓点里按曲率加权挑，这样崩缺既贴着产品边沿、又不远离锚点；
+        - 没给 hint：按曲率（凸角）加权，转角处概率更高，真实磕碰也多发生在棱边。
         """
-        import cv2
-
-        binm = (reg > 0.5).astype(np.uint8)
-        if binm.sum() < 64:
+        n = bpts.shape[0]
+        if n == 0:
             return None
-        # 主轴（PCA）
-        ys, xs = np.nonzero(binm)
-        pts = np.stack([xs, ys], 1).astype(np.float32)
-        mu = pts.mean(0)
-        cov = np.cov((pts - mu).T)
-        if np.ndim(cov) == 0:
-            cov = np.array([[cov, 0.0], [0.0, cov]], np.float32)
-        vals, vecs = np.linalg.eigh(cov)
-        major = vecs[:, int(np.argmax(vals))]
-        minor = np.array([-major[1], major[0]], np.float32)
-
-        # 距离变换：内部最大处 = 厚度最大（产品中心）
-        dt = cv2.distanceTransform(binm, cv2.DIST_L2, 3)
-        cys, cxs = np.unravel_index(int(np.argmax(dt)), dt.shape)
-
-        cands = []
-        for a_deg in (45, 135, 225, 315):
-            a = math.radians(a_deg)
-            d = major * math.cos(a) + minor * math.sin(a)
-            proj = pts @ d
-            i = int(np.argmax(proj))
-            cands.append((float(pts[i, 0]), float(pts[i, 1])))
-
-        rng.g.shuffle(cands)
-        h, w = reg.shape[:2]
-        for (cx, cy) in cands:
-            if exclude is not None and \
-                    abs(cx - exclude[0]) < exclude[2] * 1.5 and \
-                    abs(cy - exclude[1]) < exclude[2] * 1.5:
-                continue
-            # 该点必须在区域内
-            ix, iy = int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))
-            if binm[iy, ix] == 0:
-                continue
-            # 凸性检查：角点应远离"厚度最大"方向（也就是在外轮廓上）
-            # 用到中心的距离做归一化，距离越大越像角
-            dctr = math.hypot(cx - float(cxs), cy - float(cys))
-            if dctr < 8:
-                continue
-            # 外法线：从中心指向该点
-            ox, oy = cx - float(cxs), cy - float(cys)
-            n = math.hypot(ox, oy)
-            if n < 1e-6:
-                continue
-            return (cx, cy, ox / n, oy / n)
-        return None
-
+        pool = np.arange(n)
+        if hint is not None and len(hint) >= 3:
+            try:
+                ax, ay = float(hint[1]), float(hint[2])
+                d = np.hypot(bpts[:, 0] - ax, bpts[:, 1] - ay)
+                k = max(4, int(n * 0.2))
+                pool = np.argsort(d)[:k]
+            except Exception:
+                pool = np.arange(n)
+        if pool.size == 0:
+            pool = np.arange(n)
+        # 用轮廓点的局部曲率近似：三点夹角越小越尖锐
+        k = max(2, n // 220)
+        prev = np.roll(bpts, k, axis=0)
+        nxt = np.roll(bpts, -k, axis=0)
+        v1 = bpts - prev
+        v2 = nxt - bpts
+        n1 = np.linalg.norm(v1, axis=1) + 1e-6
+        n2 = np.linalg.norm(v2, axis=1) + 1e-6
+        cosang = np.clip((v1 * v2).sum(1) / (n1 * n2), -1.0, 1.0)
+        sharp = np.clip(1.0 - cosang, 0.0, 2.0)      # 越尖锐越大
+        wts = (1.0 - corner_bias) + corner_bias * (sharp / max(sharp.max(), 1e-6))
+        w = np.clip(wts[pool], 1e-6, None)
+        tot = float(w.sum())
+        if tot <= 1e-9:
+            return int(pool[int(rng.randint(0, pool.size - 1))])
+        r = rng.uniform(0.0, tot)
+        acc = 0.0
+        for i in range(pool.size):
+            acc += float(w[i])
+            if acc >= r:
+                return int(pool[i])
+        return int(pool[-1])
 
 # ==========================================================================
-# 组合器
-# ==========================================================================
-DEFECT_KINDS = ("scratch", "smudge", "discolor", "chip")
-
-#: 类型名 → 生成器类（新增缺陷类型只需在此登记一次）
-DEFECT_REGISTRY = {
-    "scratch": ScratchDefect,
-    "smudge": SmudgeDefect,
-    "discolor": DiscolorDefect,
-    "chip": ChipDefect,
-}
-
-_KIND_TO_COLOR = {
-    "scratch": (231, 76, 60),     # 红
-    "smudge": (241, 196, 15),     # 黄
-    "discolor": (52, 152, 219),   # 蓝
-    "chip": (155, 89, 182),       # 紫
-}
 
 
 def resolve_target(target: str, region_masks: Optional[dict]) -> Optional[np.ndarray]:
@@ -1186,6 +1303,363 @@ def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
 
 
 # ==========================================================================
+# 5. 黑点（黑斑 / 针孔）
+# ==========================================================================
+@dataclass
+class BlackDotParams:
+    count: int = 6                 # 黑点个数
+    size_ratio: float = 0.010      # 黑点半径相对产品短边的比例
+    darkness: float = 0.88         # 压暗程度（1=纯黑）
+    cluster: float = 0.35          # 成簇出现的概率
+    color_rgb: tuple = (26, 22, 20)  # 黑点颜色（略带冷/暖偏差）
+
+
+class BlackDotDefect(BaseDefect):
+    """黑点：陶瓷表面的黑色针孔/黑斑（烧结缺陷、污染点、金属异物灼点）。
+
+    真实特征：
+    - 尺寸很小（通常 1~��十像素），形状近圆但边缘不规则；
+    - 颜色很深（接近黑），但因表面张力会有一圈略浅的"晕"；
+    - 中心最黑、边缘略透（不是纯色圆片）；
+    - 常成簇出现，而不是均匀散布。
+    """
+
+    kind = "dot"
+
+    def render(self, rgb: np.ndarray, rng: Rng,
+               region: Optional[np.ndarray] = None, hint=None) -> DefectResult:
+        h, w = rgb.shape[:2]
+        s = self.strength
+        sv = self.severity_mult
+        base = rgb.astype(np.float32) / 255.0
+
+        reg = clip01(region) if region is not None else np.ones((h, w), np.float32)
+        ys, xs = np.nonzero(reg > 0.5)
+        if xs.size < 16:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        short = float(min(h, w))
+        cxb, cyb = float(xs.mean()), float(ys.mean())
+
+        count = max(1, int(self.params.get("count", 6)))
+        size_ratio = float(self.params.get("size_ratio", 0.010)) * (0.5 + 0.9 * s) * (0.6 + 0.5 * sv)
+        darkness = float(np.clip(self.params.get("darkness", 0.88), 0.2, 1.0))
+        cluster = float(np.clip(self.params.get("cluster", 0.35), 0.0, 1.0))
+        crgb = self.params.get("color_rgb", (26, 22, 20))
+        if not _is_rgb_triple(crgb):
+            crgb = (26, 22, 20)
+
+        dot_col = np.array([float(c) for c in crgb], np.float32) / 255.0
+        mask = np.zeros((h, w), dtype=np.float32)
+        out = base.copy()
+        n_made = 0
+        clusters: List[Tuple[float, float]] = []
+
+        for i in range(count):
+            # 成簇：一部分点围绕已有簇生成
+            if clusters and rng.bool(cluster):
+                ax, ay = clusters[int(rng.randint(0, len(clusters) - 1))]
+                a = rng.uniform(0, math.pi * 2)
+                rr = rng.uniform(0.4, 3.2) * short * size_ratio
+                cx = ax + math.cos(a) * rr
+                cy = ay + math.sin(a) * rr
+            else:
+                if region is not None:
+                    cx, cy = sample_point(region, rng, margin=0.03)
+                else:
+                    cx = rng.uniform(0.05 * w, 0.95 * w)
+                    cy = rng.uniform(0.05 * h, 0.95 * h)
+                clusters.append((cx, cy))
+            rad = max(0.8, short * size_ratio * rng.uniform(0.55, 1.7))
+            blob = _soft_blob_field((h, w), cx, cy, rad, rng.uniform(0, math.pi),
+                                    rng.uniform(0.85, 1.3), rng,
+                                    edge_soft=0.45, irregular=0.55)
+            blob = blob * clip01(reg)
+            if blob.max() <= 0.08:
+                continue
+            # 中心更实：轻微提高对比，模拟"结痂"的实心核心
+            blob = clip01(blob * (0.82 + 0.35 * blob))
+            n_made += 1
+            # 一圈略浅的晕（表面张力/污染扩散）
+            halo = np.clip(blur_mask(blob, max(1.0, rad * 0.9)) - blob, 0, 1) * 0.25
+            tot = np.clip((blob * darkness + halo * 0.7), 0.0, 1.0)[:, :, None]
+            out = out * (1.0 - tot) + dot_col[None, None, :] * tot
+            mask = np.maximum(mask, blob)
+
+        if n_made == 0 or mask.max() <= 0.02:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        return DefectResult(image=to_u8(out), mask=clip01(mask), kind=self.kind,
+                            count=n_made)
+
+
+# ==========================================================================
+# 6. 凹坑（麻点 / 缩孔）
+# ==========================================================================
+@dataclass
+class PitParams:
+    count: int = 8                 # 凹坑个数
+    size_ratio: float = 0.016      # 凹坑半径相对产品短边
+    depth: float = 0.55            # 凹陷深度（影响明暗对比）
+    highlight: float = 0.55        # 坑内高光强度
+    light_deg: float = 135.0       # 光照方向（度，0=从右）
+
+
+class PitDefect(BaseDefect):
+    """凹坑：陶瓷表面的麻点/缩孔（烧结收缩形成的小凹洞）。
+
+    真实特征（**立体感来自方向性明暗**，这是与"黑点"的本质区别）：
+    - 凹面在光照方向的一侧形成亮弧（镜面高光），另一侧形成暗弧；
+    - 坑中心最暗（光进不去）；
+    - 边缘有一圈很窄的高光环（坑口对光的反射）。
+    """
+
+    kind = "pit"
+
+    def render(self, rgb: np.ndarray, rng: Rng,
+               region: Optional[np.ndarray] = None, hint=None) -> DefectResult:
+        h, w = rgb.shape[:2]
+        s = self.strength
+        sv = self.severity_mult
+        base = rgb.astype(np.float32) / 255.0
+
+        reg = clip01(region) if region is not None else np.ones((h, w), np.float32)
+        ys, xs = np.nonzero(reg > 0.5)
+        if xs.size < 16:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        short = float(min(h, w))
+
+        count = max(1, int(self.params.get("count", 8)))
+        size_ratio = float(self.params.get("size_ratio", 0.016)) * (0.5 + 0.9 * s) * (0.6 + 0.5 * sv)
+        depth = float(np.clip(self.params.get("depth", 0.55), 0.05, 1.0))
+        hi_amt = float(np.clip(self.params.get("highlight", 0.55), 0.0, 1.5))
+        light_deg = float(self.params.get("light_deg", 135.0))
+        th = math.radians(light_deg)
+        lx, ly = math.cos(th), math.sin(th)      # 光照方向（图像坐标，y 向下）
+
+        out = base.copy()
+        mask = np.zeros((h, w), np.float32)
+        n_made = 0
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+
+        for _ in range(count):
+            if region is not None:
+                cx, cy = sample_point(region, rng, margin=0.03)
+            else:
+                cx = rng.uniform(0.05 * w, 0.95 * w)
+                cy = rng.uniform(0.05 * h, 0.95 * h)
+            rad = max(1.2, short * size_ratio * rng.uniform(0.6, 1.6))
+            # ---- 高度场（用于明暗着色）必须**光滑** ----
+            # 凹坑是规则的内凹球冠，若把分形噪声加进高度场，梯度求出的法线会
+            # 到处乱转，着色出现漩涡/尖刺状伪影。这里噪声只作用于「轮廓掩膜」，
+            # 高度场保持干净，着色才有正确的方向性明暗。
+            d = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / max(rad, 1e-6)
+            cap = np.clip(1.0 - d * d, 0.0, 1.0)          # 平滑球冠
+            if cap.max() <= 0.05:
+                continue
+
+            # 法向（由光滑球冠的梯度得到）→ Lambert 着色
+            hy, hx = np.gradient(cap * rad)
+            nlen = np.sqrt(hx * hx + hy * hy + 1.0)
+            nx_ = -hx / nlen
+            ny_ = -hy / nlen
+            nz_ = 1.0 / nlen
+            lam = clip01(nx_ * lx + ny_ * ly + nz_ * 0.88)      # 0..1
+            # 凹坑只要「一侧亮弧 + 一侧暗弧」这一条信息。
+            # 不要再叠加独立的 rimband 高光环 —— 它与镜面高光弧位置接近，
+            # 两条弧叠在一起会形成「逗号/波浪」状的假纹。
+            shade = 1.0 - depth * (1.0 - lam) * 1.20             # 背光侧变暗
+            shade = shade + hi_amt * 0.26 * np.power(clip01(lam), 6.0)   # 单一亮弧
+            shade = np.where(d < 1.0, shade, 1.0)                # 坑外不受影响
+            shade = np.clip(shade, 0.35, 1.55)
+
+            # ---- 轮廓掩膜：只在边缘环带加噪声，让坑口不规则但内部干净 ----
+            n = fractal_noise((h, w), rng, base_cells=max(4, int(rad * 0.8)),
+                              octaves=3, persistence=0.5)
+            ring = np.clip(1.0 - np.abs(d - 0.92) / 0.22, 0, 1)   # 边缘环带权重
+            rmod = d * (1.0 + 0.30 * (n - 0.5) * ring)             # 半径被噪声扰动
+            dome = np.clip(1.0 - rmod * rmod, 0.0, 1.0)
+            if dome.max() <= 0.05:
+                continue
+            n_made += 1
+
+            a = clip01(dome * np.clip(0.78 + 0.3 * s, 0, 1))[:, :, None]
+            out = clip01(out * (1 - a) + out * shade[:, :, None] * a)
+            mask = np.maximum(mask, dome * clip01(reg))
+
+        if n_made == 0 or mask.max() <= 0.02:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        return DefectResult(image=to_u8(out), mask=clip01(mask), kind=self.kind,
+                            count=n_made)
+
+
+# ==========================================================================
+# 7. 异物（粘附物 / 灰尘纤维 / 碎屑）
+# ==========================================================================
+@dataclass
+class DebrisParams:
+    count: int = 4                 # 异物个数
+    size_ratio: float = 0.013      # 异物尺寸相对产品短边
+    shadow: float = 0.45           # 投影强度
+    gloss: float = 0.35            # 高光强度
+    fiber_ratio: float = 0.35      # 呈纤维/毛发状的比例
+    color_mode: str = "auto"       # auto / dark / light / metal / fiber
+
+
+_DEBRIS_COLORS = {
+    "dark": (0.13, 0.12, 0.11),     # 深色颗粒（最常见）
+    "light": (0.72, 0.70, 0.64),    # 浅色碎屑（纸屑/灰尘）
+    "metal": (0.55, 0.57, 0.61),    # 金属屑（带冷调）
+    "fiber": (0.40, 0.38, 0.34),    # 纤维/毛发
+}
+
+
+class DebrisDefect(BaseDefect):
+    """异物：粘附在产品表面的外来物（灰尘颗粒、纤维、金属屑、碎纸屑）。
+
+    真实特征（**立体感来自投影 + 自身明暗**）：
+    - 物体本身有独立的颜色（与瓷体不同），形状不规则；
+    - 在光照反方向有一道**投影**（贴着表面的暗影）——这是"贴附感"的关键；
+    - 物体顶部有高光、底部偏暗，表现出轻微的厚度；
+    - 一部分呈纤维状（细长、弯曲、两端渐细）。
+    """
+
+    kind = "debris"
+
+    def render(self, rgb: np.ndarray, rng: Rng,
+               region: Optional[np.ndarray] = None, hint=None) -> DefectResult:
+        h, w = rgb.shape[:2]
+        s = self.strength
+        sv = self.severity_mult
+        base = rgb.astype(np.float32) / 255.0
+
+        reg = clip01(region) if region is not None else np.ones((h, w), np.float32)
+        ys, xs = np.nonzero(reg > 0.5)
+        if xs.size < 16:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        short = float(min(h, w))
+
+        count = max(1, int(self.params.get("count", 4)))
+        size_ratio = float(self.params.get("size_ratio", 0.022)) * (0.5 + 0.9 * s) * (0.6 + 0.5 * sv)
+        shadow_amt = float(np.clip(self.params.get("shadow", 0.45), 0.0, 1.0))
+        gloss = float(np.clip(self.params.get("gloss", 0.35), 0.0, 1.5))
+        fiber_ratio = float(np.clip(self.params.get("fiber_ratio", 0.35), 0.0, 1.0))
+        mode = str(self.params.get("color_mode", "auto")).lower()
+        if mode == "auto":
+            mode = "fiber" if rng.bool(fiber_ratio) else str(
+                rng.choice(["dark", "light", "metal"]))
+
+        # 光照方向：默认左上 → 投影落向右下
+        th = math.radians(rng.uniform(200.0, 250.0))
+        lx, ly = math.cos(th), math.sin(th)
+        out = base.copy()
+        mask = np.zeros((h, w), np.float32)
+        n_made = 0
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+
+        for _ in range(count):
+            if region is not None:
+                cx, cy = sample_point(region, rng, margin=0.03)
+            else:
+                cx = rng.uniform(0.05 * w, 0.95 * w)
+                cy = rng.uniform(0.05 * h, 0.95 * h)
+            rad = max(1.2, short * size_ratio * rng.uniform(0.5, 1.8))
+            is_fiber = (mode == "fiber") or rng.bool(fiber_ratio * 0.5)
+            ang = rng.uniform(0, math.pi)
+            stretch = rng.uniform(3.0, 7.0) if is_fiber else rng.uniform(0.85, 1.9)
+            obj = _soft_blob_field((h, w), cx, cy, rad, ang, stretch, rng,
+                                   edge_soft=0.30, irregular=1.25)
+            # 真实异物多是**碎屑/颗粒**：轮廓要有明显的棱角与缺口，
+            # 而不是规整的椭圆。仅在掩膜上做一次阈值化"削角"，让它更像碎块。
+            facet = fractal_noise((h, w), rng, base_cells=max(3, int(rad * 0.55)),
+                                  octaves=2, persistence=0.45)
+            if not is_fiber:
+                obj = clip01(obj * (0.72 + 0.62 * facet))
+            else:
+                # 纤维：中段实、两端渐细
+                obj = clip01(obj ** 1.7)
+            obj = obj * clip01(reg)
+            if obj.max() <= 0.10 or int((obj > 0.4).sum()) < 5:
+                continue
+            n_made += 1
+
+            col = np.array(_DEBRIS_COLORS.get(mode, _DEBRIS_COLORS["dark"]), np.float32)
+            col = np.clip(col * rng.uniform(0.80, 1.20), 0.0, 1.0)
+
+            # ---- 投影：沿光照反方向偏移并模糊（贴附感的关键） ----
+            if shadow_amt > 0.02:
+                off = max(1.0, rad * 0.42)
+                sh = np.zeros((h, w), np.float32)
+                sx0 = int(max(0, cx - lx * off - rad * 1.5))
+                sy0 = int(max(0, cy - ly * off - rad * 1.5))
+                sx1 = int(min(w, cx - lx * off + rad * 1.5 + 1))
+                sy1 = int(min(h, cy - ly * off + rad * 1.5 + 1))
+                if sx1 > sx0 and sy1 > sy0:
+                    sh[sy0:sy1, sx0:sx1] = obj[sy0:sy1, sx0:sx1]
+                sh = blur_mask(sh, max(0.7, rad * 0.22))
+                sh = clip01(sh) * (1.0 - obj) * clip01(reg)
+                out = clip01(out * (1.0 - shadow_amt * sh[:, :, None]))
+
+            # ---- 物体自身明暗：**很扁**的起伏，避免变成"球" ----
+            # 真实附着物贴在表面，厚度很小，明暗范围窄；
+            # 不再用物体轮廓梯度（那会让它看起来像颗珠子），改用低频面噪声。
+            oy_, ox_ = np.gradient(clip01(obj) * rad)
+            slope = clip01(0.5 + 0.5 * (-ox_ * lx - oy_ * ly) * 0.8)
+            lit = 0.84 + 0.16 * slope
+            lit = lit + gloss * 0.18 * np.power(clip01(slope), 6.0)
+            lit = np.clip(np.where(obj > 0.02, lit, 1.0), 0.45, 1.22)
+            body = np.clip(col[None, None, :] * lit[:, :, None], 0, 1)
+            a = (clip01(obj) * np.clip(0.85 + 0.2 * s, 0, 1))[:, :, None]
+            out = clip01(out * (1 - a) + body * a)
+            mask = np.maximum(mask, obj)
+
+        if n_made == 0 or mask.max() <= 0.02:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        return DefectResult(image=to_u8(out), mask=clip01(mask), kind=self.kind,
+                            count=n_made)
+
+# 组合器
+# ==========================================================================
+DEFECT_KINDS = ("scratch", "smudge", "discolor", "chip", "dot", "pit", "debris")
+
+#: 类型名 → 生成器类（新增缺陷类型只需在此登记一次）
+DEFECT_REGISTRY = {
+    "scratch": ScratchDefect,
+    "smudge": SmudgeDefect,
+    "discolor": DiscolorDefect,
+    "chip": ChipDefect,
+    "dot": BlackDotDefect,
+    "pit": PitDefect,
+    "debris": DebrisDefect,
+}
+
+#: 各类「个数」在参数里的字段名（增强模式据此决定每张图生成几个）
+COUNT_FIELD = {
+    "scratch": "count",
+    "smudge": "blob_count",
+    "discolor": "region_count",
+    "chip": "count",
+    "dot": "count",
+    "pit": "count",
+    "debris": "count",
+}
+
+_KIND_TO_COLOR = {
+    "scratch": (231, 76, 60),     # 红
+    "smudge": (241, 196, 15),     # 黄
+    "discolor": (52, 152, 219),   # 蓝
+    "chip": (155, 89, 182),       # 紫
+    "dot": (44, 44, 52),          # 深灰（黑点）
+    "pit": (86, 160, 210),        # 青蓝（凹坑）
+    "debris": (230, 138, 74),     # 橙（异物）
+}
+
+
+# ==========================================================================
 # 5. 缺陷样本增强：在用户手绘区域内随机生成多个、随机类型/位置/形状的缺陷
 # ==========================================================================
 def _soft_ellipse(shape, cx: float, cy: float, r: float,
@@ -1236,7 +1710,7 @@ def _random_defect_params(kind: str, rng: Rng, strength: float,
             "opacity": rng.uniform(0.35, 0.8),
             "granular": rng.uniform(0.2, 0.6),
             "speckle": bool(rng.bool(0.6)),
-            "edge_soft": rng.uniform(0.6, 1.4),
+            "edge_soft": rng.uniform(0.35, 0.95),
         }
     if kind == "discolor":
         p = {
@@ -1244,8 +1718,7 @@ def _random_defect_params(kind: str, rng: Rng, strength: float,
             "region_scale": float(np.clip(scale * rng.uniform(0.6, 1.3), 0.05, 0.6)),
             "lum_shift": rng.uniform(-18, 6),
             "sat_gain": rng.uniform(1.05, 1.6),
-            "edge_soft": rng.uniform(0.2, 0.7),
-            "edge_blur": rng.uniform(0.6, 1.4),
+            "edge_soft": rng.uniform(0.35, 0.95),
         }
         # 沿用用户在界面里选定的异色颜色（随机/预设/自定义），让增强样本也带指定色调
         if extra:
@@ -1257,14 +1730,41 @@ def _random_defect_params(kind: str, rng: Rng, strength: float,
     if kind == "chip":
         return {
             "count": 1,
-            "size_ratio": float(np.clip(scale * rng.uniform(0.6, 1.2), 0.05, 0.6)),
-            "jag_ratio": rng.uniform(0.2, 0.7),
-            "depth_ratio": rng.uniform(0.6, 1.2),
+            "size_ratio": float(np.clip(scale * rng.uniform(0.5, 1.1), 0.05, 0.5)),
+            "jag_ratio": rng.uniform(0.25, 0.7),
+            "depth_ratio": rng.uniform(0.18, 0.45),     # 浅崩缺
             "rim_width": rng.uniform(1.5, 3.0),
-            "crack_ratio": rng.uniform(0.0, 0.5),
+            "crack_ratio": rng.uniform(0.0, 0.45),
             "grain": rng.uniform(0.3, 0.6),
             "darkness": rng.uniform(0.25, 0.5),
             "debris": bool(rng.bool(0.6)),
+            "corner_bias": rng.uniform(0.15, 0.6),
+        }
+    if kind == "dot":
+        return {
+            "count": 1,
+            "size_ratio": float(np.clip(scale * rng.uniform(0.5, 1.4), 0.004, 0.05)),
+            "darkness": rng.uniform(0.70, 0.95),
+            "cluster": rng.uniform(0.0, 0.6),
+            "color_rgb": [int(x) for x in rng.choice(
+                [(22, 20, 18), (34, 30, 26), (16, 16, 18), (40, 34, 28)])],
+        }
+    if kind == "pit":
+        return {
+            "count": 1,
+            "size_ratio": float(np.clip(scale * rng.uniform(0.6, 1.5), 0.006, 0.06)),
+            "depth": rng.uniform(0.35, 0.85),
+            "highlight": rng.uniform(0.3, 0.9),
+            "light_deg": rng.uniform(0.0, 360.0),
+        }
+    if kind == "debris":
+        return {
+            "count": 1,
+            "size_ratio": float(np.clip(scale * rng.uniform(0.5, 1.5), 0.008, 0.08)),
+            "shadow": rng.uniform(0.25, 0.6),
+            "gloss": rng.uniform(0.15, 0.6),
+            "fiber_ratio": rng.uniform(0.0, 0.7),
+            "color_mode": str(rng.choice(["auto", "dark", "light", "metal", "fiber"])),
         }
     return {}
 
@@ -1273,8 +1773,10 @@ def _read_augment_counts(settings) -> dict:
     """从缺陷生成算法参数里读出各类的"个数"，作为每张增强图的缺陷数。
 
     与 apply_defects 保持一致：每张图的总缺陷数 = 各启用类型的个数之和。
-    各类对应的"个数"字段：scratch.count / smudge.blob_count /
-    discolor.region_count / chip.count。未启用任何类型时退化为四类各 1 个。
+    各类"个数"字段名统一由 ``COUNT_FIELD`` 给出（scratch.count /
+    smudge.blob_count / discolor.region_count / chip·dot·pit·debris.count），
+    新增类型只需在 ``COUNT_FIELD`` 与 ``DEFECT_REGISTRY`` 各登记一次。
+    未启用任何类型时退化为每类各 1 个。
     """
     counts: dict = {}
     if settings:
@@ -1282,21 +1784,12 @@ def _read_augment_counts(settings) -> dict:
             cfg = settings.get(k, {}) or {}
             if not cfg.get("enable", False):
                 continue
-            if k == "scratch":
-                c = int(cfg.get("count", 1))
-            elif k == "smudge":
-                c = int(cfg.get("blob_count", 1))
-            elif k == "discolor":
-                c = int(cfg.get("region_count", 1))
-            elif k == "chip":
-                c = int(cfg.get("count", 1))
-            else:
-                c = 1
+            c = int(cfg.get(COUNT_FIELD.get(k, "count"), 1))
             c = max(0, c)
             if c > 0:
                 counts[k] = c
     if not counts:
-        # 未启用任何类型时，退化为四类各 1 个，保证有产物
+        # 未启用任何类型时，退化为每类各 1 个，保证有产物
         counts = {k: 1 for k in DEFECT_KINDS}
     return counts
 
@@ -1349,8 +1842,16 @@ def _augment_one_image(rgb: np.ndarray, region, counts: dict,
             gen = DEFECT_REGISTRY.get(kind)
             if gen is None:
                 continue
-            res = gen(strength=strength, severity_mult=sv, **cfg).render(
-                img, rng, region=local)
+            # 崩缺是「边沿」缺陷：局部椭圆是产品内部的，压根没有轮廓可用。
+            # 这里把整个手绘区域交给它，并用 hint 告诉它锚点在哪，
+            # 让它去挑**离锚点最近的那段边沿**，既保证有轮廓可依，
+            # 又不会跑到离锚点很远的地方去。
+            if kind == "chip":
+                res = gen(strength=strength, severity_mult=sv, **cfg).render(
+                    img, rng, region=reg, hint=(0.0, ax, ay))
+            else:
+                res = gen(strength=strength, severity_mult=sv, **cfg).render(
+                    img, rng, region=local)
             res.kind = kind
             res.severity = severity
             res.surface = "augment"

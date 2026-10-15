@@ -81,9 +81,13 @@ def main():
         view._polys.append([(0.30 * W, 0.30 * H), (0.55 * W, 0.32 * H),
                             (0.52 * W, 0.55 * H), (0.28 * W, 0.50 * H)])
 
-    def run(setup, seed=3):
+    def run(setup, seed=3, mode=None):
         view.clear_regions()
         app.processEvents()
+        if mode is not None:
+            win.preview.cmb_posmode.setCurrentIndex(
+                win.preview.cmb_posmode.findData(mode))
+            app.processEvents()
         win.preview.cb_draw.setChecked(True)
         setup()
         app.processEvents()
@@ -134,10 +138,15 @@ def main():
         worst, dm, ph = run(lambda: brush(0.35), seed=s)
         check(worst == 0, "seed=%d：硬越界像素=%d" % (s, worst))
 
-    print("[5] 手绘区域完全画在产品外 → 不应生成缺陷")
-    worst, dm, ph = run(lambda: brush(0.22))
+    print("[5] 位置方式对「画在产品外」的行为差异")
+    # 默认已是「按图像坐标位置」：区域就是手绘掩膜本身，画在产品外也照常生成
+    worst, dm, ph = run(lambda: brush(0.22), mode="pixel")
+    check(worst != "off_product" and worst == 0,
+          "按图像坐标位置：画在产品外仍按手绘坐标生成且不越界（返回 %r）" % (worst,))
+    # 「限定在产品轮廓内」：交集为空 → 应阻止生成
+    worst, dm, ph = run(lambda: brush(0.22), mode="product")
     check(worst == "off_product",
-          "区域未覆盖产品时已阻止生成（返回 %r）" % (worst,))
+          "限定在产品轮廓内：区域未覆盖产品时已阻止生成（返回 %r）" % (worst,))
 
     print("[6] 未画区域 → 仍应整图随机")
     view.clear_regions()
