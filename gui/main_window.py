@@ -167,7 +167,7 @@ class DefectPage(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 8, 10, 8)
-        outer.setSpacing(5)
+        outer.setSpacing(4)
 
         self.enable = QCheckBox(f"启用「{KIND_CN.get(kind, kind)}」缺陷")
         self.enable.setChecked(bool(cfg.get("enable", False)))
@@ -178,7 +178,7 @@ class DefectPage(QWidget):
         self.grid = QGridLayout(self.body)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setHorizontalSpacing(16)
-        self.grid.setVerticalSpacing(4)
+        self.grid.setVerticalSpacing(3)
         outer.addWidget(self.body, 1)
 
         # 明显度（目标表面已按需求移除，缺陷统一落在产品可见表面上）
@@ -231,36 +231,62 @@ class DefectPage(QWidget):
             self._items.append(self._labeled("色调", cb))
             # 自定义取色按钮（仅「自定义」生效）
             self.color_rgb = tuple(int(x) for x in cfg.get("color_rgb", [150, 130, 80]))
-            self.btn_color = QPushButton("取色…")
-            self.btn_color.setFixedWidth(72)
-            self._apply_color_swatch()
-            self.btn_color.clicked.connect(self._pick_color)
-            self._items.append(self._labeled("自定义色", self.btn_color))
+            self._add_color_picker("选择异色目标色")
         elif kind == "chip":
             self._add("strength", "崩缺强度", 0.0, 1.0, cfg.get("strength", 0.60))
             self._add("count", "崩缺数", 1, 12, cfg.get("count", 1), integer=True)
             self._add("size_ratio", "崩缺长度", 0.03, 0.60, cfg.get("size_ratio", 0.22))
             self._add("depth_ratio", "崩缺深度", 0.05, 0.80, cfg.get("depth_ratio", 0.30))
             self._add("jag_ratio", "崩口锯齿", 0.05, 0.90, cfg.get("jag_ratio", 0.45))
+            self._add("edge_soft", "边界柔和度", 0.0, 1.0, cfg.get("edge_soft", 0.45))
+            self._add("color_match", "颜色接近度", 0.0, 1.0, cfg.get("color_match", 0.65))
             self._add("corner_bias", "转角倾向", 0.0, 1.0, cfg.get("corner_bias", 0.35))
             self._add("crack_ratio", "延伸裂纹", 0.0, 0.90, cfg.get("crack_ratio", 0.30))
         elif kind == "dot":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
-            self._add("count", "黑点数", 1, 120, cfg.get("count", 6), integer=True)
+            self._add("count", "黑点数", 1, 120, cfg.get("count", 1), integer=True)
             self._add("size_ratio", "黑点大小", 0.002, 0.06, cfg.get("size_ratio", 0.010))
-            self._add("darkness", "黑度", 0.2, 1.0, cfg.get("darkness", 0.88))
+            self._add("darkness", "颜色深度", 0.2, 1.0, cfg.get("darkness", 0.88))
+            self._add("edge_soft", "边界柔和度", 0.0, 1.0, cfg.get("edge_soft", 0.65))
             self._add("cluster", "成簇程度", 0.0, 1.0, cfg.get("cluster", 0.35))
+            cb = QComboBox()
+            for k, txt in [("auto", "自动（深黑）"), ("custom", "自定义")]:
+                cb.addItem(txt, k)
+            cb.setCurrentIndex(max(0, cb.findData(cfg.get("color", "auto"))))
+            cb.currentIndexChanged.connect(self._emit)
+            self.combos["color"] = cb
+            self._items.append(self._labeled("黑点颜色", cb))
+            self.color_rgb = tuple(int(x) for x in cfg.get("color_rgb", [26, 22, 20]))
+            self._add_color_picker("选择黑点颜色")
         elif kind == "pit":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
-            self._add("count", "凹坑数", 1, 120, cfg.get("count", 8), integer=True)
+            self._add("count", "凹坑数", 1, 120, cfg.get("count", 1), integer=True)
             self._add("size_ratio", "凹坑大小", 0.003, 0.08, cfg.get("size_ratio", 0.011))
             self._add("depth", "凹陷深度", 0.05, 1.0, cfg.get("depth", 0.55))
             self._add("highlight", "坑内高光", 0.0, 1.5, cfg.get("highlight", 0.55))
             self._add("light_deg", "光照方向", 0, 360,
                       cfg.get("light_deg", 135.0), step=1)
+        elif kind == "bump":
+            self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
+            self._add("count", "鼓包数", 1, 40, cfg.get("count", 1), integer=True)
+            self._add("size_ratio", "鼓包大小", 0.003, 0.08, cfg.get("size_ratio", 0.012))
+            self._add("height", "凸起高度", 0.05, 1.0, cfg.get("height", 0.55))
+            self._add("gloss", "顶部高光", 0.0, 1.5, cfg.get("gloss", 0.40))
+            self._add("edge_soft", "边缘过渡", 0.0, 1.0, cfg.get("edge_soft", 0.60))
+            self._add("light_deg", "光照方向", 0, 360,
+                      cfg.get("light_deg", 135.0), step=1)
+            cb = QComboBox()
+            for k, txt in [("auto", "自动（同邻近区域）"), ("custom", "自定义")]:
+                cb.addItem(txt, k)
+            cb.setCurrentIndex(max(0, cb.findData(cfg.get("color", "auto"))))
+            cb.currentIndexChanged.connect(self._emit)
+            self.combos["color"] = cb
+            self._items.append(self._labeled("鼓包颜色", cb))
+            self.color_rgb = tuple(int(x) for x in cfg.get("color_rgb", [180, 170, 160]))
+            self._add_color_picker("选择鼓包颜色")
         elif kind == "debris":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
-            self._add("count", "异物数", 1, 40, cfg.get("count", 4), integer=True)
+            self._add("count", "异物数", 1, 40, cfg.get("count", 1), integer=True)
             self._add("size_ratio", "异物大小", 0.004, 0.10, cfg.get("size_ratio", 0.013))
             self._add("shadow", "投影强度", 0.0, 1.0, cfg.get("shadow", 0.45))
             self._add("gloss", "高光", 0.0, 1.5, cfg.get("gloss", 0.35))
@@ -359,17 +385,29 @@ class DefectPage(QWidget):
             f"background-color: rgb({r},{g},{b}); color:#0b1220; "
             f"border:1px solid #49525e; border-radius:4px;")
 
+    def _add_color_picker(self, title: str):
+        """添加「取色…」按钮（配合页内 combos["color"] 的「自定义」选项）。"""
+        self._color_title = title
+        self.btn_color = QPushButton("取色…")
+        self.btn_color.setFixedWidth(72)
+        self._apply_color_swatch()
+        self.btn_color.clicked.connect(self._pick_color)
+        self._items.append(self._labeled("自定义色", self.btn_color))
+
     def _pick_color(self):
         """打开取色对话框，选定后切到「自定义」并广播变更。"""
         init = QColor(*self.color_rgb)
-        c = QColorDialog.getColor(init, self, "选择异色目标色")
+        c = QColorDialog.getColor(init, self,
+                                  getattr(self, "_color_title", "选择颜色"))
         if not c.isValid():
             return
         self.color_rgb = (c.red(), c.green(), c.blue())
         self._apply_color_swatch()
-        idx = self.combos["color"].findData("custom")
-        if idx >= 0:
-            self.combos["color"].setCurrentIndex(idx)
+        cb = self.combos.get("color")
+        if cb is not None:
+            idx = cb.findData("custom")
+            if idx >= 0:
+                cb.setCurrentIndex(idx)
         self._emit()
 
 

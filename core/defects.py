@@ -971,6 +971,8 @@ class ChipParams:
     crack_ratio: float = 0.30      # 从崩缺延伸出的裂纹长度比
     grain: float = 0.45            # 断面颗粒感
     darkness: float = 0.32         # 崩缺内壁变暗程度
+    edge_soft: float = 0.45        # 边界柔和度（0=断口边界清晰 … 1=平滑过渡）
+    color_match: float = 0.65      # 断面颜色接近度（1=与邻近区域颜色几乎一致）
     debris: bool = True            # 是否产生细小碎屑
     corner_bias: float = 0.35      # 落在转角处的概率（转角更易磕碰）
 
@@ -1036,6 +1038,8 @@ class ChipDefect(BaseDefect):
         depth_ratio = float(self.params.get("depth_ratio", 0.30)) \
             * (0.5 + 0.7 * s) * (0.6 + 0.4 * sv)
         corner_bias = float(np.clip(self.params.get("corner_bias", 0.35), 0.0, 1.0))
+        edge_soft = float(np.clip(self.params.get("edge_soft", 0.45), 0.0, 1.0))
+        color_match = float(np.clip(self.params.get("color_match", 0.65), 0.0, 1.0))
 
         mask = np.zeros((h, w), dtype=np.float32)
         out = base.copy()
@@ -1090,8 +1094,10 @@ class ChipDefect(BaseDefect):
                                  + jag * (enoise - 0.5) * 0.85)
             reach = np.maximum(reach, 0.8)
 
-            # 缺口本体：从轮廓向内啃进 reach 处
-            soft = max(0.9, depth_len * 0.22)
+            # 缺口本体：从轮廓向内啃进 reach 处。
+            # 过渡带宽度由「边界柔和度」控制：越大断口边缘越平滑、
+            # 与周围材料的衔接越自然（不再是一圈生硬的边界线）
+            soft = max(1.0, depth_len * (0.10 + 0.55 * edge_soft))
             bite = clip01((reach - dd) / soft) * span
             bite = clip01(bite) * clip01(reg)
             if bite.max() <= 0.06 or int((bite > 0.5).sum()) < 10:
@@ -1099,15 +1105,31 @@ class ChipDefect(BaseDefect):
             used.append((cx, cy, half))
             n_made += 1
 
-            # ---- 断面材质：略亮、粗糙的新鲜断口 ----
+            # ---- 断面材质：颜色与邻近区域接近 + 粗糙颗粒感 ----
+            solid = (bite > 0.5).astype(np.uint8)
             depth_w = clip01(1.0 - dd / max(float(np.percentile(reach, 99.0)), 1e-6))
             lum = out.mean(axis=2, keepdims=True)
             grain_amt = float(self.params.get("grain", 0.45)) * (0.4 + 0.7 * s) * (0.4 + 0.6 * sv)
             grain = fractal_noise((h, w), rng, base_cells=max(6, int(half * 1.1)),
                                   octaves=4, persistence=0.62)
-            # 断口只比原表面略亮（+3%~11%），主要靠粗糙感与暗边区分
-            fracture = clip01(lum * rng.uniform(1.03, 1.11)
+            # 模型A（旧）：断口比原表面略亮（+3%~11%），靠粗糙感与暗边区分
+            frac_old = clip01(lum * rng.uniform(1.03, 1.11)
                               + (grain - 0.5)[:, :, None] * grain_amt * 0.45)
+            # 模型B（新）：取崩口周围环带的平均色 → 断面颜色与邻近区域几乎
+            # 一致（真实崩缺露出的是同一块材料），只保留轻微颗粒起伏
+            r2 = max(3, int(half * 0.6))
+            near = (cv2.dilate(solid, np.ones((2 * r2 + 1, 2 * r2 + 1), np.uint8)) > 0)
+            sel = near & (reg > 0.5) & (bite <= 0.05)
+            if int(sel.sum()) >= 32:
+                surr = base[sel].mean(axis=0)
+            elif (reg > 0.5).any():
+                surr = base[reg > 0.5].mean(axis=0)
+            else:
+                surr = np.array([0.7, 0.7, 0.7], np.float32)
+            frac_near = clip01(surr[None, None, :]
+                               + (grain - 0.5)[:, :, None] * grain_amt * 0.30)
+            # 「颜色接近度」在两个模型间插值：1=完全跟随邻近区域颜色
+            fracture = clip01(frac_old * (1.0 - color_match) + frac_near * color_match)
             dark = float(self.params.get("darkness", 0.32)) * (0.4 + 0.8 * s) * (0.4 + 0.6 * sv)
             fracture = clip01(fracture - dark * depth_w[:, :, None] * 0.34)
             # 露出未烧结体，断面略偏灰褐
@@ -1122,7 +1144,8 @@ class ChipDefect(BaseDefect):
             grown = cv2.dilate(solid, k3, iterations=k)
             rim = clip01((grown - solid).astype(np.float32)) * (1.0 - bite * 0.5)
             rim = clip01(rim) * clip01(reg)
-            out = clip01(out * (1.0 - 0.42 * rim[:, :, None]))
+            # 边界柔和度越大，交界暗边越淡（暗边也是「边界感」的来源之一）
+            out = clip01(out * (1.0 - (0.42 - 0.18 * edge_soft) * rim[:, :, None]))
 
             # ---- 缺口外侧（背景侧）的细小崩渣 ----
             if self.params.get("debris", True):
@@ -1307,20 +1330,24 @@ def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
 # ==========================================================================
 @dataclass
 class BlackDotParams:
-    count: int = 6                 # 黑点个数
+    count: int = 1                 # 黑点个数
     size_ratio: float = 0.010      # 黑点半径相对产品短边的比例
-    darkness: float = 0.88         # 压暗程度（1=纯黑）
+    darkness: float = 0.88         # 颜色深度（1=中心达到纯色）
     cluster: float = 0.35          # 成簇出现的概率
-    color_rgb: tuple = (26, 22, 20)  # 黑点颜色（略带冷/暖偏差）
+    edge_soft: float = 0.65        # 边界柔和度（0=边界清晰 … 1=几乎无边界）
+    color: str = "auto"            # auto=自动深色 / custom=自定义颜色
+    color_rgb: tuple = (26, 22, 20)  # 黑点颜色（custom 模式生效）
 
 
 class BlackDotDefect(BaseDefect):
     """黑点：陶瓷表面的黑色针孔/黑斑（烧结缺陷、污染点、金属异物灼点）。
 
     真实特征：
-    - 尺寸很小（通常 1~��十像素），形状近圆但边缘不规则；
-    - 颜色很深（接近黑），但因表面张力会有一圈略浅的"晕"；
-    - 中心最黑、边缘略透（不是纯色圆片）；
+    - 形状是**不规则的圆/椭圆**（长宽比、朝向、边界均随机），
+      边缘经软边场平滑衰减，没有一圈明显的边界线；
+    - 手绘区域只**限定范围**（黑点落在区域内），不改变黑点自身形状；
+    - 颜色支持自定义（取色），darkness 直接控制不透明度——
+      调到 1 时黑点中心就是所选颜色本身；
     - 常成簇出现，而不是均匀散布。
     """
 
@@ -1339,18 +1366,27 @@ class BlackDotDefect(BaseDefect):
             return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
                                 kind=self.kind, count=0)
         short = float(min(h, w))
-        cxb, cyb = float(xs.mean()), float(ys.mean())
+        # 区域**向内羽化**：黑点只被「限定范围」，即使中心贴近区域边界，
+        # 也是平滑淡出，而不会留下一条笔直的区域切痕
+        regf = _feather_region(reg, _feather_width_for(reg, h, w)) \
+            if region is not None else reg
 
-        count = max(1, int(self.params.get("count", 6)))
+        count = max(1, int(self.params.get("count", 1)))
         size_ratio = float(self.params.get("size_ratio", 0.010)) * (0.5 + 0.9 * s) * (0.6 + 0.5 * sv)
         darkness = float(np.clip(self.params.get("darkness", 0.88), 0.2, 1.0))
         cluster = float(np.clip(self.params.get("cluster", 0.35), 0.0, 1.0))
+        es = float(np.clip(self.params.get("edge_soft", 0.65), 0.0, 1.0))
+        cm = str(self.params.get("color", "auto")).lower()
         crgb = self.params.get("color_rgb", (26, 22, 20))
         if not _is_rgb_triple(crgb):
             crgb = (26, 22, 20)
+        if cm == "custom":
+            dot_cols = [tuple(float(c) for c in crgb)]
+        else:
+            # 自动：几种接近黑的自然污染色（略带冷暖差异）
+            dot_cols = [(22, 20, 18), (34, 30, 26), (16, 16, 18), (40, 34, 28)]
 
-        dot_col = np.array([float(c) for c in crgb], np.float32) / 255.0
-        mask = np.zeros((h, w), dtype=np.float32)
+        dot_mask = np.zeros((h, w), dtype=np.float32)
         out = base.copy()
         n_made = 0
         clusters: List[Tuple[float, float]] = []
@@ -1371,25 +1407,28 @@ class BlackDotDefect(BaseDefect):
                     cy = rng.uniform(0.05 * h, 0.95 * h)
                 clusters.append((cx, cy))
             rad = max(0.8, short * size_ratio * rng.uniform(0.55, 1.7))
+            col = np.array(dot_cols[int(rng.randint(0, len(dot_cols) - 1))],
+                           np.float32) / 255.0
+            # 不规则的圆/椭圆：长宽比与朝向随机，边界不规则度与柔和度可调
             blob = _soft_blob_field((h, w), cx, cy, rad, rng.uniform(0, math.pi),
-                                    rng.uniform(0.85, 1.3), rng,
-                                    edge_soft=0.45, irregular=0.55)
-            blob = blob * clip01(reg)
+                                    rng.uniform(0.80, 1.45), rng,
+                                    edge_soft=es, irregular=0.55 + 0.35 * es)
+            blob = clip01(blob) * regf
             if blob.max() <= 0.08:
                 continue
-            # 中心更实：轻微提高对比，模拟"结痂"的实心核心
-            blob = clip01(blob * (0.82 + 0.35 * blob))
             n_made += 1
-            # 一圈略浅的晕（表面张力/污染扩散）
-            halo = np.clip(blur_mask(blob, max(1.0, rad * 0.9)) - blob, 0, 1) * 0.25
-            tot = np.clip((blob * darkness + halo * 0.7), 0.0, 1.0)[:, :, None]
-            out = out * (1.0 - tot) + dot_col[None, None, :] * tot
-            mask = np.maximum(mask, blob)
+            # darkness 直接控制不透明度：调到 1 时中心就是所选纯色；
+            # 边缘 alpha 随软边场自然衰减，不会有硬边
+            halo = np.clip(blur_mask(blob, max(1.0, rad * 0.9)) - blob, 0, 1)
+            tot = clip01(blob * darkness
+                         + halo * 0.30 * (1.0 - darkness * 0.6))[:, :, None]
+            out = out * (1.0 - tot) + col[None, None, :] * tot
+            dot_mask = np.maximum(dot_mask, blob)
 
-        if n_made == 0 or mask.max() <= 0.02:
+        if n_made == 0 or dot_mask.max() <= 0.02:
             return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
                                 kind=self.kind, count=0)
-        return DefectResult(image=to_u8(out), mask=clip01(mask), kind=self.kind,
+        return DefectResult(image=to_u8(out), mask=clip01(dot_mask), kind=self.kind,
                             count=n_made)
 
 
@@ -1398,8 +1437,8 @@ class BlackDotDefect(BaseDefect):
 # ==========================================================================
 @dataclass
 class PitParams:
-    count: int = 8                 # 凹坑个数
-    size_ratio: float = 0.016      # 凹坑半径相对产品短边
+    count: int = 1                 # 凹坑个数
+    size_ratio: float = 0.011      # 凹坑半径相对产品短边
     depth: float = 0.55            # 凹陷深度（影响明暗对比）
     highlight: float = 0.55        # 坑内高光强度
     light_deg: float = 135.0       # 光照方向（度，0=从右）
@@ -1409,9 +1448,11 @@ class PitDefect(BaseDefect):
     """凹坑：陶瓷表面的麻点/缩孔（烧结收缩形成的小凹洞）。
 
     真实特征（**立体感来自方向性明暗**，这是与"黑点"的本质区别）：
-    - 凹面在光照方向的一侧形成亮弧（镜面高光），另一侧形成暗弧；
-    - 坑中心最暗（光进不去）；
-    - 边缘有一圈很窄的高光环（坑口对光的反射）。
+    - 「凹」的高度场是负的（中心低、边缘高）→ 法线朝坑心倾斜：
+      迎光侧内壁背光变暗、**背光侧内壁被照亮**——这正是凹的读法；
+      若极性反了（法线向外倾），看起来就像鼓包凸起；
+    - 坑中心偏暗（光进不去）；
+    - 边缘轮廓不规则（噪声只作用在轮廓环带，坑内高度场保持光滑）。
     """
 
     kind = "pit"
@@ -1430,8 +1471,8 @@ class PitDefect(BaseDefect):
                                 kind=self.kind, count=0)
         short = float(min(h, w))
 
-        count = max(1, int(self.params.get("count", 8)))
-        size_ratio = float(self.params.get("size_ratio", 0.016)) * (0.5 + 0.9 * s) * (0.6 + 0.5 * sv)
+        count = max(1, int(self.params.get("count", 1)))
+        size_ratio = float(self.params.get("size_ratio", 0.011)) * (0.5 + 0.9 * s) * (0.6 + 0.5 * sv)
         depth = float(np.clip(self.params.get("depth", 0.55), 0.05, 1.0))
         hi_amt = float(np.clip(self.params.get("highlight", 0.55), 0.0, 1.5))
         light_deg = float(self.params.get("light_deg", 135.0))
@@ -1459,8 +1500,11 @@ class PitDefect(BaseDefect):
             if cap.max() <= 0.05:
                 continue
 
-            # 法向（由光滑球冠的梯度得到）→ Lambert 着色
-            hy, hx = np.gradient(cap * rad)
+            # 法向（由光滑球冠的梯度得到）→ Lambert 着色。
+            # ⚠️ 凹坑高度场取**负**（中心低、边缘高）→ 法线朝坑心倾斜：
+            # 迎光侧内壁背光变暗、背光侧内壁被照亮 —— 这才是「凹」的明暗。
+            # （若取正高度场，法线向外倾，视觉上读成鼓包凸起。）
+            hy, hx = np.gradient(-cap * rad)
             nlen = np.sqrt(hx * hx + hy * hy + 1.0)
             nx_ = -hx / nlen
             ny_ = -hy / nlen
@@ -1500,7 +1544,7 @@ class PitDefect(BaseDefect):
 # ==========================================================================
 @dataclass
 class DebrisParams:
-    count: int = 4                 # 异物个数
+    count: int = 1                 # 异物个数
     size_ratio: float = 0.013      # 异物尺寸相对产品短边
     shadow: float = 0.45           # 投影强度
     gloss: float = 0.35            # 高光强度
@@ -1622,9 +1666,132 @@ class DebrisDefect(BaseDefect):
         return DefectResult(image=to_u8(out), mask=clip01(mask), kind=self.kind,
                             count=n_made)
 
+
+# ==========================================================================
+# 8. 鼓包凸起（局部隆起 / 起泡）
+# ==========================================================================
+@dataclass
+class BumpParams:
+    count: int = 1                 # 鼓包个数
+    size_ratio: float = 0.012      # 鼓包半径相对产品短边
+    height: float = 0.55           # 凸起高度（影响立体感强弱）
+    gloss: float = 0.40            # 顶部高光强度
+    light_deg: float = 135.0       # 光照方向（度，0=从右）
+    edge_soft: float = 0.60        # 边缘过渡柔和度（0=边界清晰 … 1=平滑融入）
+    color: str = "auto"            # auto=保持邻近区域材质 / custom=自定义颜色
+    color_rgb: tuple = (180, 170, 160)  # 鼓包颜色（custom 模式生效）
+
+
+class BumpDefect(BaseDefect):
+    """鼓包凸起：表层局部隆起/起泡（分层、烧结鼓胀）。
+
+    真实特征（与凹坑正好相反的明暗极性）：
+    - 颜色与邻近区域几乎一致（还是那块材料，只是被顶了起来）——
+      auto 模式直接保留原表面材质，只叠加方向性明暗；
+    - 「凸」的高度场是正的（中心高）→ 法线向外倾：
+      迎光侧被照亮、背光侧落下暗影，顶部有一小块柔和高光；
+    - 轮廓是光滑的圆/椭圆（边缘环带轻噪声），边缘经软过渡融入周围，
+      没有边界线。
+    """
+
+    kind = "bump"
+
+    def render(self, rgb: np.ndarray, rng: Rng,
+               region: Optional[np.ndarray] = None, hint=None) -> DefectResult:
+        h, w = rgb.shape[:2]
+        s = self.strength
+        sv = self.severity_mult
+        base = rgb.astype(np.float32) / 255.0
+
+        reg = clip01(region) if region is not None else np.ones((h, w), np.float32)
+        ys, xs = np.nonzero(reg > 0.5)
+        if xs.size < 16:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        short = float(min(h, w))
+
+        count = max(1, int(self.params.get("count", 1)))
+        size_ratio = float(self.params.get("size_ratio", 0.012)) * (0.5 + 0.9 * s) * (0.6 + 0.5 * sv)
+        height_amt = float(np.clip(self.params.get("height", 0.55), 0.05, 1.0))
+        gloss = float(np.clip(self.params.get("gloss", 0.40), 0.0, 1.5))
+        light_deg = float(self.params.get("light_deg", 135.0))
+        es = float(np.clip(self.params.get("edge_soft", 0.60), 0.0, 1.0))
+        cm = str(self.params.get("color", "auto")).lower()
+        crgb = self.params.get("color_rgb", (180, 170, 160))
+        if not _is_rgb_triple(crgb):
+            crgb = (180, 170, 160)
+        th = math.radians(light_deg)
+        lx, ly = math.cos(th), math.sin(th)      # 光照方向（图像坐标，y 向下）
+
+        out = base.copy()
+        mask = np.zeros((h, w), np.float32)
+        n_made = 0
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+
+        for _ in range(count):
+            if region is not None:
+                cx, cy = sample_point(region, rng, margin=0.03)
+            else:
+                cx = rng.uniform(0.05 * w, 0.95 * w)
+                cy = rng.uniform(0.05 * h, 0.95 * h)
+            rad = max(1.5, short * size_ratio * rng.uniform(0.6, 1.6))
+
+            # ---- 高度场：光滑**正**球冠（中心高）→ 凸起的明暗极性 ----
+            d = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / max(rad, 1e-6)
+            cap = np.clip(1.0 - d * d, 0.0, 1.0)
+            if cap.max() <= 0.05:
+                continue
+            hy, hx = np.gradient(cap * rad)      # 正号 → 法线向外倾（凸）
+            nlen = np.sqrt(hx * hx + hy * hy + 1.0)
+            nx_ = -hx / nlen
+            ny_ = -hy / nlen
+            nz_ = 1.0 / nlen
+            lam = clip01(nx_ * lx + ny_ * ly + nz_ * 0.88)
+            # 迎光侧亮、背光侧暗 + 顶部柔和高光（单一信息，不做多余环带）
+            shade = 1.0 - height_amt * 0.35 * (1.0 - lam)
+            shade = shade + gloss * 0.30 * np.power(clip01(lam), 5.0)
+            shade = np.clip(np.where(d < 1.15, shade, 1.0), 0.55, 1.5)
+
+            # ---- 轮廓：只在边缘环带加噪声，鼓包内部高度场保持光滑 ----
+            n = fractal_noise((h, w), rng, base_cells=max(4, int(rad * 0.8)),
+                              octaves=3, persistence=0.5)
+            ring = np.clip(1.0 - np.abs(d - 0.92) / 0.22, 0, 1)
+            rmod = d * (1.0 + 0.18 * (n - 0.5) * ring)
+            dome = np.clip(1.0 - rmod * rmod, 0.0, 1.0)
+            if dome.max() <= 0.05:
+                continue
+
+            # ---- 颜色：auto 保持原表面材质（只加明暗）；custom 用指定颜色 ----
+            if cm == "custom":
+                col = np.array([float(c) for c in crgb], np.float32) / 255.0
+                detail = fractal_noise((h, w), rng,
+                                       base_cells=max(4, int(rad * 1.4)),
+                                       octaves=2, persistence=0.5)
+                body = clip01(col[None, None, :]
+                              * (0.96 + 0.08 * detail[:, :, None]) * shade[:, :, None])
+            else:
+                body = base * shade[:, :, None]   # 材质不变，立体感全部来自明暗
+
+            # ---- 边缘平滑融入：alpha 随 smoothstep 衰减，边缘处接近 0 ----
+            band = 0.10 + 0.55 * es               # es 越大过渡越宽、越无边界感
+            a = _smoothstep((1.0 - rmod) / max(band, 1e-3))
+            a = clip01(a * np.clip(0.80 + 0.3 * s, 0, 1)) * clip01(reg)
+            if a.max() <= 0.05:
+                continue
+            n_made += 1
+            out = clip01(out * (1 - a[:, :, None]) + body * a[:, :, None])
+            mask = np.maximum(mask, dome * clip01(reg))
+
+        if n_made == 0 or mask.max() <= 0.02:
+            return DefectResult(image=rgb.copy(), mask=np.zeros((h, w), np.float32),
+                                kind=self.kind, count=0)
+        return DefectResult(image=to_u8(out), mask=clip01(mask), kind=self.kind,
+                            count=n_made)
+
 # 组合器
 # ==========================================================================
-DEFECT_KINDS = ("scratch", "smudge", "discolor", "chip", "dot", "pit", "debris")
+DEFECT_KINDS = ("scratch", "smudge", "discolor", "chip", "dot", "pit",
+                "debris", "bump")
 
 #: 类型名 → 生成器类（新增缺陷类型只需在此登记一次）
 DEFECT_REGISTRY = {
@@ -1635,6 +1802,7 @@ DEFECT_REGISTRY = {
     "dot": BlackDotDefect,
     "pit": PitDefect,
     "debris": DebrisDefect,
+    "bump": BumpDefect,
 }
 
 #: 各类「个数」在参数里的字段名（增强模式据此决定每张图生成几个）
@@ -1646,6 +1814,7 @@ COUNT_FIELD = {
     "dot": "count",
     "pit": "count",
     "debris": "count",
+    "bump": "count",
 }
 
 _KIND_TO_COLOR = {
@@ -1656,6 +1825,7 @@ _KIND_TO_COLOR = {
     "dot": (44, 44, 52),          # 深灰（黑点）
     "pit": (86, 160, 210),        # 青蓝（凹坑）
     "debris": (230, 138, 74),     # 橙（异物）
+    "bump": (255, 128, 170),      # 粉（鼓包）
 }
 
 
@@ -1737,18 +1907,26 @@ def _random_defect_params(kind: str, rng: Rng, strength: float,
             "crack_ratio": rng.uniform(0.0, 0.45),
             "grain": rng.uniform(0.3, 0.6),
             "darkness": rng.uniform(0.25, 0.5),
+            "edge_soft": rng.uniform(0.25, 0.75),
+            "color_match": rng.uniform(0.4, 0.9),
             "debris": bool(rng.bool(0.6)),
             "corner_bias": rng.uniform(0.15, 0.6),
         }
     if kind == "dot":
-        return {
+        p = {
             "count": 1,
             "size_ratio": float(np.clip(scale * rng.uniform(0.5, 1.4), 0.004, 0.05)),
             "darkness": rng.uniform(0.70, 0.95),
             "cluster": rng.uniform(0.0, 0.6),
-            "color_rgb": [int(x) for x in rng.choice(
-                [(22, 20, 18), (34, 30, 26), (16, 16, 18), (40, 34, 28)])],
+            "edge_soft": rng.uniform(0.40, 0.90),
         }
+        # 沿用用户在界面里选定的黑点颜色（自动/自定义），让增强样本也带指定色调
+        if extra:
+            if "color" in extra:
+                p["color"] = str(extra["color"])
+            if _is_rgb_triple(extra.get("color_rgb")):
+                p["color_rgb"] = list(extra["color_rgb"])
+        return p
     if kind == "pit":
         return {
             "count": 1,
@@ -1765,6 +1943,15 @@ def _random_defect_params(kind: str, rng: Rng, strength: float,
             "gloss": rng.uniform(0.15, 0.6),
             "fiber_ratio": rng.uniform(0.0, 0.7),
             "color_mode": str(rng.choice(["auto", "dark", "light", "metal", "fiber"])),
+        }
+    if kind == "bump":
+        return {
+            "count": 1,
+            "size_ratio": float(np.clip(scale * rng.uniform(0.6, 1.5), 0.005, 0.06)),
+            "height": rng.uniform(0.30, 0.80),
+            "gloss": rng.uniform(0.15, 0.70),
+            "edge_soft": rng.uniform(0.35, 0.90),
+            "light_deg": rng.uniform(0.0, 360.0),
         }
     return {}
 

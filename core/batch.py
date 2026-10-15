@@ -33,22 +33,29 @@ DEFAULT_SETTINGS: Dict[str, dict] = {
     "chip": {"enable": False, "strength": 0.60, "count": 1,
              "size_ratio": 0.22, "depth_ratio": 0.30, "jag_ratio": 0.45,
              "crack_ratio": 0.30, "corner_bias": 0.35,
+             "edge_soft": 0.45, "color_match": 0.65,
              "target": "both", "severity": "mixed"},
-    "dot": {"enable": False, "strength": 0.50, "count": 6,
+    "dot": {"enable": False, "strength": 0.50, "count": 1,
             "size_ratio": 0.010, "darkness": 0.88, "cluster": 0.35,
+            "edge_soft": 0.65, "color": "auto", "color_rgb": [26, 22, 20],
             "target": "body", "severity": "mixed"},
-    "pit": {"enable": False, "strength": 0.50, "count": 8,
+    "pit": {"enable": False, "strength": 0.50, "count": 1,
             "size_ratio": 0.011, "depth": 0.55, "highlight": 0.55,
             "light_deg": 135.0,
             "target": "body", "severity": "mixed"},
-    "debris": {"enable": False, "strength": 0.50, "count": 4,
+    "debris": {"enable": False, "strength": 0.50, "count": 1,
                "size_ratio": 0.013, "shadow": 0.45, "gloss": 0.35,
                "fiber_ratio": 0.35, "color_mode": "auto",
                "target": "both", "severity": "mixed"},
+    "bump": {"enable": False, "strength": 0.50, "count": 1,
+             "size_ratio": 0.012, "height": 0.55, "gloss": 0.40,
+             "light_deg": 135.0, "edge_soft": 0.60,
+             "color": "auto", "color_rgb": [180, 170, 160],
+             "target": "body", "severity": "mixed"},
 }
 
 KIND_CN = {"scratch": "划痕", "smudge": "脏污", "discolor": "异色", "chip": "崩缺",
-           "dot": "黑点", "pit": "凹坑", "debris": "异物"}
+           "dot": "黑点", "pit": "凹坑", "debris": "异物", "bump": "鼓包"}
 SEVERITY_CN = {"obvious": "明显", "medium": "中等", "subtle": "不明显", "mixed": "随机混合"}
 TARGET_CN = {"body": "瓷体", "electrode": "端电极", "both": "瓷体+电极"}
 

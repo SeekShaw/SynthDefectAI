@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=42, help="随机种子（默认 42）")
     p.add_argument("--max-side", type=int, default=0, help="长边缩放，0 表示原尺寸")
     p.add_argument("--kinds", default="scratch,smudge,discolor",
-                   help="启用的缺陷类型，逗号分隔：scratch,smudge,discolor,chip,dot,pit,debris")
+                   help="启用的缺陷类型，逗号分隔：scratch,smudge,discolor,chip,dot,pit,debris,bump")
     p.add_argument("--strength", type=float, default=None,
                    help="统一覆盖所有缺陷的强度 0~1")
     p.add_argument("--scratch-count", type=int, default=None, help="每张图划痕条数")
@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dot-count", type=int, default=None, help="每张图黑点个数")
     p.add_argument("--pit-count", type=int, default=None, help="每张图凹坑个数")
     p.add_argument("--debris-count", type=int, default=None, help="每张图异物个数")
+    p.add_argument("--bump-count", type=int, default=None, help="每张图鼓包个数")
     p.add_argument("--no-mask", action="store_true", help="不输出掩膜")
     p.add_argument("--no-region-out", action="store_true", help="不输出区域分割可视化")
     p.add_argument("--no-preview", action="store_true", help="不输出可视化对比图")
@@ -109,7 +110,7 @@ def cli_main(argv=None) -> int:
     if args.chip_count is not None:
         settings["chip"]["count"] = int(args.chip_count)
     for _k, _v in (("dot", args.dot_count), ("pit", args.pit_count),
-                   ("debris", args.debris_count)):
+                   ("debris", args.debris_count), ("bump", args.bump_count)):
         if _v is not None and _k in settings:
             settings[_k]["count"] = int(_v)
     if args.target is not None:

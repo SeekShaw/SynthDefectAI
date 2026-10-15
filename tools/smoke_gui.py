@@ -448,12 +448,26 @@ def main() -> int:
     else:
         check(False, "崩缺应能生成")
 
-    # ================= 新增三类缺陷 =================
-    for _k, _cn in (("dot", "黑点"), ("pit", "凹坑"), ("debris", "异物")):
+    # ================= 新增四类缺陷 =================
+    for _k, _cn in (("dot", "黑点"), ("pit", "凹坑"), ("debris", "异物"),
+                    ("bump", "鼓包")):
         check(_k in win.pages, f"{_cn}页已注册")
         check("count" in win.pages[_k].rows, f"{_cn}有「个数」参数行")
     check("fiber_ratio" in win.pages["debris"].rows, "异物有「纤维状比例」参数行")
-    print("      七类缺陷页:", list(win.pages.keys()))
+    # 第六轮细化：默认个数全部为 1；黑点/鼓包有颜色选择；崩缺有柔和度/接近度
+    from core.batch import DEFAULT_SETTINGS as _DS
+    for _k, _st in _DS.items():
+        _cf = ("blob_count" if _k == "smudge"
+               else "region_count" if _k == "discolor" else "count")
+        check(int(_st.get(_cf, 0)) == 1, f"{KIND_CN.get(_k, _k)}默认个数为 1")
+    check("edge_soft" in win.pages["dot"].rows, "黑点有「边界柔和度」参数行")
+    check(win.pages["dot"].combos.get("color") is not None, "黑点有颜色选择")
+    check(getattr(win.pages["dot"], "btn_color", None) is not None, "黑点有取色按钮")
+    check(win.pages["bump"].combos.get("color") is not None, "鼓包有颜色选择")
+    check(getattr(win.pages["bump"], "btn_color", None) is not None, "鼓包有取色按钮")
+    check("edge_soft" in win.pages["chip"].rows, "崩缺有「边界柔和度」参数行")
+    check("color_match" in win.pages["chip"].rows, "崩缺有「颜色接近度」参数行")
+    print("      八类缺陷页:", list(win.pages.keys()))
 
     win.pages["scratch"].enable.setChecked(False)
     win.pages["smudge"].enable.setChecked(False)
