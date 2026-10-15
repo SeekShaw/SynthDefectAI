@@ -37,7 +37,8 @@ def main() -> int:
         app.setWindowIcon(QIcon(ico))
 
     win = MainWindow()
-    win.show()
+    # 启动即最大化：按工作台屏幕铺满，避免用户先手动拉窗口
+    win.showMaximized()
     return app.exec()
 
 
