@@ -137,6 +137,32 @@ def main() -> int:
               for k in ("smudge", "discolor", "chip")),
           "脏污 / 异色 / 缺角默认关闭")
 
+    # ================= 需求：缺陷类型互斥启用（弹窗提示 + 自动回退） =================
+    from PyQt6.QtWidgets import QMessageBox as _QMB0
+    _capt = []
+    _QMB0.information = staticmethod(
+        lambda *a, **k: (_capt.append(a[2] if len(a) > 2 else ""),
+                         _QMB0.StandardButton.Ok)[1])
+    win.pages["smudge"].enable.setChecked(True)      # 应被拒绝
+    app.processEvents()
+    check(not win.pages["smudge"].enable.isChecked(),
+          "互斥：已开启划痕时再开脏污 → 自动回退")
+    check(win.pages["scratch"].enable.isChecked(),
+          "互斥：原启用的划痕保持不变")
+    check(bool(_capt) and "只允许开启1个" in str(_capt[-1])
+          and "划痕" in str(_capt[-1]),
+          f"弹窗文案含规则与已启用类型：{_capt[-1] if _capt else '（无弹窗）'}")
+    _QMB0.information = staticmethod(lambda *a, **k: _QMB0.StandardButton.Ok)
+    _m0 = win.preview.cmb_mode.model()
+    check(not _m0.item(2).isEnabled() and not _m0.item(3).isEnabled(),
+          "启用划痕时「画矩形区域 / 画笔涂抹」不可选（只能画线条）")
+    check(_m0.item(1).isEnabled(), "启用划痕时「画线条」可选")
+    win.pages["scratch"].enable.setChecked(False)    # 全部关闭
+    check(_m0.item(1).isEnabled() and _m0.item(2).isEnabled()
+          and _m0.item(3).isEnabled(),
+          "全部关闭后线条 / 矩形 / 画笔均可用")
+    win.pages["scratch"].enable.setChecked(True)     # 恢复默认：仅划痕启用
+
     # ================= 需求：输出设置只有「缺陷图」默认开启 =================
     outs = [("缺陷图", win.cb_defect, True), ("缺陷掩膜", win.cb_mask, False),
             ("对比图", win.cb_prev, False), ("区域分割图", win.cb_region, False),
@@ -187,8 +213,14 @@ def main() -> int:
         print("      Tab 标题:", names)
         check(tabs[0].count() == len(DEFECT_KINDS),
               f"Tab 页数为 {len(DEFECT_KINDS)}（实际 {tabs[0].count()}）")
-        check(all("●" in n or "○" in n for n in names),
-              "Tab 标题含启用状态指示（●/○）")
+        from PyQt6.QtWidgets import QTabBar
+        cbs = [tabs[0].tabBar().tabButton(i, QTabBar.ButtonPosition.LeftSide)
+               for i in range(tabs[0].count())]
+        check(all(isinstance(w, QCheckBox) for w in cbs),
+              "每个 Tab 标签上挂有启用复选框（启用开关在页外可见）")
+        check(cbs and cbs[0].isChecked()
+              and not any(w.isChecked() for w in cbs[1:]),
+              "默认仅划痕的复选框被勾选（当前启用一目了然）")
 
     # 卡片标题「缺陷参数」已删除（现为「2 · 缺陷图生成配置」）
     check(not any("缺陷参数" in (g.title() or "") for g in win.findChildren(QGroupBox)),
@@ -299,9 +331,11 @@ def main() -> int:
     win.lst.setCurrentRow(0)
     app.processEvents()
 
-    # 四种缺陷默认关闭，这里显式开启以走通预览生成路径
+    # 四种缺陷默认关闭，这里用互斥锁批量开启以走通预览生成路径
+    win._mutual_lock = True
     for p in win.pages.values():
         p.enable.setChecked(True)
+    win._mutual_lock = False
     app.processEvents()
 
     win.ed_out.setText(os.path.join(HERE, "build", "out_gui"))
@@ -322,12 +356,13 @@ def main() -> int:
     v0 = pv.views[0]
     modes = [pv.cmb_mode.itemText(i) for i in range(pv.cmb_mode.count())]
     print("      手绘模式:", modes)
-    check(len(modes) == 5 and "画线条" in modes[1] and "画矩形区域" in modes[2]
-          and "画多边形" in modes[3] and "画笔涂抹" in modes[4],
-          f"手绘模式共 5 种且顺序正确：{modes}")
+    check(len(modes) == 4 and "画线条" in modes[1] and "画矩形区域" in modes[2]
+          and "画笔涂抹" in modes[3],
+          f"手绘模式共 4 种（「画多边形」已删除）且顺序正确：{modes}")
     check(pv.cmb_mode.itemData(1) == ImageView.MODE_LINE
-          and pv.cmb_mode.itemData(3) == ImageView.MODE_POLY,
-          "线条 / 多边形模式已注册")
+          and pv.cmb_mode.itemData(2) == ImageView.MODE_RECT
+          and pv.cmb_mode.itemData(3) == ImageView.MODE_BRUSH,
+          "线条 / 矩形 / 画笔模式已注册")
     # 需求：「限定手绘区域」默认开启，且默认进入「画线条」
     check(pv.cb_draw.isChecked(), "工具栏「限定手绘区域」默认开启")
     check(pv.cmb_mode.isEnabled() and pv.cmb_mode.currentData() == ImageView.MODE_LINE,
@@ -345,7 +380,7 @@ def main() -> int:
     # 需求：笔刷只在「画笔涂抹」时出现
     check(not pv.lbl_brush.isVisible() and not pv.sld_brush.isVisible(),
           "非画笔模式下笔刷控件隐藏")
-    pv.cmb_mode.setCurrentIndex(4)      # 画笔涂抹
+    pv.cmb_mode.setCurrentIndex(3)      # 画笔涂抹
     for _ in range(3):
         app.processEvents()
     check(pv.lbl_brush.isVisible() and pv.sld_brush.isVisible(),
@@ -502,10 +537,12 @@ def main() -> int:
     check("chip" not in [k for k in kinds_applied if k != "chip"],
           "仅启用缺角时不会生成其它类型")
 
-    # 恢复前三类
+    # 恢复前三类（互斥规则下用锁批量开启，仅测试路径）
+    win._mutual_lock = True
     win.pages["scratch"].enable.setChecked(True)
     win.pages["smudge"].enable.setChecked(True)
     win.pages["discolor"].enable.setChecked(True)
+    win._mutual_lock = False
     chip.enable.setChecked(False)
     app.processEvents()
 
@@ -589,15 +626,19 @@ def main() -> int:
     v0._polys.append([(w_img * 0.30, h_img * 0.35), (w_img * 0.70, h_img * 0.32),
                       (w_img * 0.72, h_img * 0.70), (w_img * 0.28, h_img * 0.68)])
     v0._lines.append(list(line))
+    win._mutual_lock = True
     win.pages["smudge"].enable.setChecked(True)
+    win._mutual_lock = False
     win._force_resegment()
     win.refresh_preview()
     app.processEvents()
     check("沿手绘线条" in pv.lbl_info.text()
           and "划痕" in pv.lbl_info.text(),
           f"线条 + 多边形同时存在时两者各司其职：{pv.lbl_info.text()[:44]}")
+    win._mutual_lock = True
     for k in ("smudge", "discolor", "chip"):
         win.pages[k].enable.setChecked(k == "smudge")
+    win._mutual_lock = False
 
     # ============ 需求：拖动画线（真实鼠标事件）→ 刷新预览必须有图 ============
     from PyQt6.QtCore import QPoint, QPointF, Qt as _Qt
@@ -685,8 +726,9 @@ def main() -> int:
     check(pv.views[1].has_image() and pv.views[0].has_image(),
           "「区域与缺陷」「原图」栏都有图片")
 
-    # 未提交的多边形在刷新时自动提交（用户点刷新前忘了双击）
-    pv.cmb_mode.setCurrentIndex(3)          # 画多边形
+    # 未提交的图形在刷新时自动提交（用户点刷新前忘了双击/回车）
+    # （下拉里的「画多边形」已删除，但视图内部的多边形掩膜机制保留，直接设模式验证）
+    v0.set_mode(ImageView.MODE_POLY)
     for _ in range(2):
         app.processEvents()
     poly_pts = [(_x0 - 60.0, _cy - 60.0), (_x0 + 40.0, _cy - 80.0),
@@ -699,7 +741,7 @@ def main() -> int:
     for _ in range(2):
         app.processEvents()
     check(len(v0._polys) == n_before + 1,
-          "点「刷新预览」时自动提交未完成的多边形")
+          "点「缺陷生成预览」时自动提交未完成的多边形")
 
     # 没有线条时不应让第三栏空白
     pv.clear_regions()
@@ -894,8 +936,11 @@ def main() -> int:
 
     # ================= 缩放功能（点击真实按钮） =================
     btns = {b.text(): b for b in pv.findChildren(QPushButton)}
-    check("适应窗口" in btns and "1:1" in btns and "＋" in btns and "－" in btns,
-          f"工具栏含 适应窗口/1:1/＋/－ 按钮（实际 {sorted(btns)}）")
+    check("适应窗口显示" in btns and "100%显示" in btns
+          and "＋" in btns and "－" in btns,
+          f"工具栏含 适应窗口显示/100%显示/＋/－ 按钮（实际 {sorted(btns)}）")
+    check(all(t in btns for t in ("←", "→", "↑", "↓")),
+          "工具栏含缺陷位置微调按钮 ←/→/↑/↓")
 
     pv.fit_all()
     app.processEvents()
@@ -930,6 +975,48 @@ def main() -> int:
     app.processEvents()
     v = pv.views[0]
     check(abs(v._scale() - 1.0) < 1e-3, f"1:1 后缩放为 1.0（{v._scale():.4f}）")
+
+    # ================= 需求：缺陷位置像素级微调 =================
+    from gui.main_window import _shift_arr
+    _a = np.arange(12, dtype=np.float32).reshape(3, 4)
+    _s = _shift_arr(_a, 1, 0)
+    check(_s[0, 1] == _a[0, 0] and _s[0, 0] == 0 and _s[2, 3] == _a[2, 2],
+          "_shift_arr 平移正确（越界置 0、不环绕）")
+    check(getattr(win, "_defect_shift_base", None) is not None,
+          "预览已缓存缺陷层（可做位置微调）")
+    check(win._defect_offset == (0, 0), "生成预览后偏移归零")
+    # 先停掉防抖定时器并手动刷新一次，避免后台重生成与微调点击竞态
+    win._preview_timer.stop()
+    win.refresh_preview()
+    app.processEvents()
+    check(win._defect_offset == (0, 0), "手动刷新后偏移仍为 0（基线就绪）")
+    btns["←"].click()
+    app.processEvents()
+    check(win._defect_offset == (-1, 0),
+          f"点「←」缺陷位置左移 1px（偏移 {win._defect_offset}）")
+    btns["↓"].click()
+    btns["↓"].click()
+    app.processEvents()
+    check(win._defect_offset == (-1, 2),
+          f"连续点击累计偏移（{win._defect_offset}）")
+    check("偏移" in pv.lbl_info.text(),
+          f"信息栏显示当前偏移：{pv.lbl_info.text()[:40]}")
+    # 平移后第三栏应为「原图×(1-掩膜) + 平移缺陷图×掩膜」——背景不动、缺陷移动
+    _orig, _defect, _mid, _mask = win._defect_shift_base
+    _m2 = _shift_arr(_mask, *win._defect_offset)
+    _exp = np.clip(_orig.astype(np.float32) * (1 - _m2[:, :, None])
+                   + _shift_arr(_defect.astype(np.float32), *win._defect_offset)
+                   * _m2[:, :, None], 0, 255).astype(np.uint8)
+    check(_exp.shape == _orig.shape and _exp.dtype == np.uint8,
+          "平移合成图与原图同尺寸（背景不动、缺陷整体移动）")
+    # 位置微调按钮带自动重复（按住连续移动）
+    for _b in ("←", "→", "↑", "↓"):
+        check(btns[_b].autoRepeat(), f"「{_b}」按住可连续移动（autoRepeat）")
+    # 重新生成预览后偏移应归零
+    win._preview_timer.stop()
+    win.refresh_preview()
+    app.processEvents()
+    check(win._defect_offset == (0, 0), "重新生成预览后偏移归零")
 
     off0 = QPointF(v._offset)
     v._panning = True

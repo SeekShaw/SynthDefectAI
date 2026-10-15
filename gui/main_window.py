@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboB
                              QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                              QMessageBox, QProgressBar, QApplication, QPushButton, QScrollArea,
                              QSlider, QSpinBox, QSplitter, QStatusBar,
-                             QTabWidget, QVBoxLayout, QWidget)
+                             QTabBar, QTabWidget, QVBoxLayout, QWidget)
 
 from core.batch import (BatchConfig, DEFAULT_SETTINGS, KIND_CN, SEVERITY_CN,
                         TARGET_CN, ItemResult, run_batch)
@@ -29,6 +29,17 @@ from .image_view import ImageView, np_to_qpixmap
 from .preview_pane import POS_MODE_PIXEL, POS_MODE_PRODUCT, PreviewPane
 
 _KIND_COLOR = dict(_KIND_TO_COLOR)   # 各缺陷类型在叠加图里的颜色
+
+
+def _shift_arr(a: np.ndarray, dx: int, dy: int) -> np.ndarray:
+    """把二维/三维数组整体平移 (dx, dy) 像素，越界部分置 0（不环绕）。"""
+    h, w = a.shape[:2]
+    r = np.zeros_like(a)
+    ys, ye = max(0, dy), min(h, h + dy)
+    xs, xe = max(0, dx), min(w, w + dx)
+    if ys < ye and xs < xe:
+        r[ys:ye, xs:xe] = a[ys - dy:ye - dy, xs - dx:xe - dx]
+    return r
 
 # 异色「色调」下拉选项（随机 / 预设 / 自定义）
 DISCOLOR_COLOR_OPTS = [
@@ -169,10 +180,14 @@ class DefectPage(QWidget):
         outer.setContentsMargins(10, 8, 10, 8)
         outer.setSpacing(4)
 
-        self.enable = QCheckBox(f"启用「{KIND_CN.get(kind, kind)}」缺陷")
+        # 启用开关：不放进页内布局 —— 主窗口会用 setTabButton 把它挂到
+        # 所属 Tab 标签上（页外可见，一眼看出当前启用了哪个缺陷类型）
+        self.enable = QCheckBox()
+        self.enable.setToolTip(
+            f"启用/停用「{KIND_CN.get(kind, kind)}」缺陷\n"
+            "（同时只能启用一个缺陷类型，生成速度考虑）")
         self.enable.setChecked(bool(cfg.get("enable", False)))
         self.enable.toggled.connect(self._emit)
-        outer.addWidget(self.enable)
 
         self.body = QWidget()
         self.grid = QGridLayout(self.body)
@@ -444,7 +459,7 @@ class ThumbnailGallery(QWidget):
 
     def _placeholder(self):
         self.clear()
-        tip = QLabel("勾选「缺陷样本增强模式」并点「刷新预览」后，\n"
+        tip = QLabel("勾选「缺陷样本增强模式」并点「缺陷生成预览」后，\n"
                      "这里显示生成的缩略图；点击缩略图可在右侧查看大图。")
         tip.setWordWrap(True)
         tip.setProperty("role", "hint")
@@ -575,6 +590,11 @@ class MainWindow(QMainWindow):
         self.preview.rectAngleChanged.connect(self._on_rect_angle)
         self.preview.posModeChanged.connect(self._on_pos_mode_changed)
         self.preview.overlayChanged.connect(self._refresh_overlay)
+        self.preview.defectMove.connect(self._shift_defect)
+        # 缺陷位置微调：最近一次预览生成的「原图/缺陷图/叠加图/联合掩膜」+ 累计偏移
+        self._defect_shift_base = None
+        self._defect_offset = (0, 0)
+        self._mutual_lock = False
         self.split_main.addWidget(self.preview)
 
         # 中间：增强样本缩略图画廊（框选区域空出后放这里）
@@ -611,7 +631,7 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setValue(0)
         bl.addWidget(self.progress, 1)
-        self.btn_preview = QPushButton("刷新预览")
+        self.btn_preview = QPushButton("缺陷生成预览")
         self.btn_preview.clicked.connect(self.refresh_preview)
         bl.addWidget(self.btn_preview)
         self.btn_save = QPushButton("保存缺陷图")
@@ -634,6 +654,8 @@ class MainWindow(QMainWindow):
         bl.addWidget(self.btn_stop)
         root.addWidget(bottom)
         self.status.showMessage("就绪")
+        # 默认划痕已启用 → 启动时就把绘制方式限制为「画线条」
+        self._update_mode_availability()
 
     def showEvent(self, e):
         """窗口显示后按真实布局高度统一三张卡片高度（保证文字不裁切）。"""
@@ -832,17 +854,21 @@ class MainWindow(QMainWindow):
         vp.setContentsMargins(12, 12, 12, 12)
         vp.setSpacing(8)
 
-        # Tab 放在卡片顶部，标签即四个缺陷名（● 已启用 / ○ 未启用）
+        # Tab 放在卡片顶部，标签即缺陷名；启用开关以复选框形式挂在每个
+        # Tab 标签左侧（页外），一眼可见当前启用了哪一个
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.currentChanged.connect(self._sync_defect_header)
         self.pages: dict[str, DefectPage] = {}
-        for kind in DEFECT_KINDS:
+        for i, kind in enumerate(DEFECT_KINDS):
             page = DefectPage(kind, DEFAULT_SETTINGS[kind])
             page.changed.connect(self.schedule_preview)
             self.pages[kind] = page
             self.tabs.addTab(page, f"  {KIND_CN[kind]}  ")
-            page.enable.toggled.connect(self._sync_tab_titles)
+            self.tabs.tabBar().setTabButton(
+                i, QTabBar.ButtonPosition.LeftSide, page.enable)
+            page.enable.toggled.connect(
+                lambda on, k=kind: self._on_defect_enable(k, on))
         self._sync_tab_titles()
         vp.addWidget(self.tabs, 1)
         return gb
@@ -852,8 +878,38 @@ class MainWindow(QMainWindow):
         kinds = list(DEFECT_KINDS)
         return kinds[i] if i < len(kinds) else kinds[0]
 
+    def _on_defect_enable(self, kind: str, on: bool):
+        """启用开关互斥：出于生成速度考虑，同时只允许开启一个缺陷类型。"""
+        if on and not getattr(self, "_mutual_lock", False):
+            other = next((k for k in DEFECT_KINDS
+                          if k != kind and self.pages[k].enable.isChecked()),
+                         None)
+            if other is not None:
+                # 先回退本次勾选，再弹窗说明
+                self._mutual_lock = True
+                self.pages[kind].enable.setChecked(False)
+                self._mutual_lock = False
+                QMessageBox.information(
+                    self, "提示",
+                    f"考虑到缺陷的生成速度，只允许开启1个，"
+                    f"目前已开启「{KIND_CN.get(other, other)}」，"
+                    f"请关闭后再开启本缺陷类型")
+                return
+        self._update_mode_availability()
+        self._sync_tab_titles()
+
+    def _update_mode_availability(self):
+        """按启用的缺陷类型联动绘制方式：
+        划痕 → 只能画线条；其它类型 → 只能画矩形 / 画笔。"""
+        pv = getattr(self, "preview", None)
+        if pv is None:
+            return
+        scratch_on = self.pages["scratch"].enable.isChecked()
+        any_on = any(p.enable.isChecked() for p in self.pages.values())
+        pv.set_mode_availability(scratch_on=scratch_on, any_on=any_on)
+
     def _sync_defect_header(self, *_):
-        """Tab 标签已含缺陷名与启用状态，这里只需刷新提示（状态栏）。"""
+        """Tab 上的复选框即启用状态指示，这里只需刷新提示（状态栏）。"""
         kind = self.current_defect_kind()
         page = self.pages.get(kind)
         if page is None:
@@ -868,10 +924,7 @@ class MainWindow(QMainWindow):
                    if getattr(getattr(self, "preview", None), "draw_enabled", bool)()
                    else ""))
 
-    def _sync_tab_titles(self):
-        for i, kind in enumerate(DEFECT_KINDS):
-            on = self.pages[kind].enable.isChecked()
-            self.tabs.setTabText(i, f"  {'●' if on else '○'} {KIND_CN[kind]}  ")
+    def _sync_tab_titles(self, *_):
         self._sync_defect_header()
 
     def _build_menu(self):
@@ -1266,7 +1319,7 @@ class MainWindow(QMainWindow):
         results = getattr(self, "aug_results", None)
         if not results:
             QMessageBox.information(self, "尚未生成",
-                                    "请先点「刷新预览」生成增强样本，再保存。")
+                                    "请先点「缺陷生成预览」生成增强样本，再保存。")
             return
         idx = getattr(self, "aug_selected", 0)
         if idx < 0 or idx >= len(results):
@@ -1342,6 +1395,35 @@ class MainWindow(QMainWindow):
             f"开始增强生成：{len(self.input_paths)} 张 × {cfg.augment_images} 张/图 {note}")
         self.thread.start()
 
+    # ---------------- 缺陷位置微调（像素级平移） ----------------
+    def _shift_defect(self, dx: int, dy: int):
+        """把最近一次生成的缺陷整体平移 (dx, dy) 像素（不重新生成）。
+
+        原理：预览生成时缓存「原图 / 缺陷图 / 叠加图 / 联合掩膜」，
+        平移后用 `原图×(1-掩膜) + 缺陷图×掩膜` 重新合成，
+        因此只移动缺陷本身，背景保持不动。
+        """
+        base = getattr(self, "_defect_shift_base", None)
+        if base is None or self.current_image is None:
+            self.preview.set_info("请先点「缺陷生成预览」生成缺陷，再调整位置")
+            return
+        orig, defect, mid, mask = base
+        ox, oy = getattr(self, "_defect_offset", (0, 0))
+        ox, oy = int(ox + dx), int(oy + dy)
+        self._defect_offset = (ox, oy)
+        if mid is None:
+            mid = orig
+        mask_s = _shift_arr(mask, ox, oy)
+        comp = (orig.astype(np.float32) * (1.0 - mask_s[:, :, None])
+                + _shift_arr(defect.astype(np.float32), ox, oy) * mask_s[:, :, None])
+        comp = np.clip(comp, 0, 255).astype(np.uint8)
+        mid_s = _shift_arr(mid, ox, oy)
+        self.preview.set_images(orig, mid_s, comp)
+        self.defect_view.set_image(comp)
+        self.preview.set_info(
+            f"缺陷位置偏移 x={ox:+d}px y={oy:+d}px（相对生成位置，"
+            f"「保存缺陷图」同样生效；重新生成预览后归零）")
+
     def refresh_preview(self):
         if self.current_image is None:
             self.preview.set_images(None, None, None)
@@ -1352,6 +1434,7 @@ class MainWindow(QMainWindow):
         # 产品轮廓 / 限定范围叠加层：两种模式都画（先画好，之后切换模式不必重算分割）
         self._refresh_overlay()
         if self.cb_augment.isChecked():
+            self._defect_shift_base = None     # 增强模式不支持位置微调
             self._refresh_augment_preview()
             return
         # 非增强模式：清空画廊，缺陷图同步显示在右侧缺陷视图
@@ -1377,6 +1460,7 @@ class MainWindow(QMainWindow):
 
         if not any(v.get("enable") for v in settings.values()):
             # 第三栏仍显示当前图（而不是空白），否则看起来像「没有图片」
+            self._defect_shift_base = None
             self.preview.set_images(self.current_image, seg_overlay,
                                     self.current_image)
             self.preview.set_info(
@@ -1398,6 +1482,7 @@ class MainWindow(QMainWindow):
             # 像素坐标模式则不应发生（区域就是手绘掩膜本身）。
             dm = self._draw_mask()
             if dm is not None and region_masks is None:
+                self._defect_shift_base = None
                 self.preview.set_images(self.current_image, seg_overlay,
                                         self.current_image)
                 self.defect_view.set_image(self.current_image)
@@ -1421,6 +1506,15 @@ class MainWindow(QMainWindow):
                 a = (clip01(r.mask) * 0.6)[:, :, None]
                 mid = mid * (1 - a) + np.array(color, np.float32)[None, None, :] * a
             mid = np.clip(mid, 0, 255).astype(np.uint8)
+
+            # 缓存缺陷层供「缺陷位置微调」使用；重新生成后偏移归零
+            self._defect_offset = (0, 0)
+            if applied:
+                mask_all = clip01(sum(clip01(r.mask) for r in applied))
+                self._defect_shift_base = (self.current_image, img, mid,
+                                           mask_all.astype(np.float32))
+            else:
+                self._defect_shift_base = None
 
             if applied:
                 kinds = " + ".join(
@@ -1458,6 +1552,7 @@ class MainWindow(QMainWindow):
                 self.preview.set_info(f"未生成缺陷{why} ｜ seed={seed}")
             ok = True
         except Exception as e:
+            self._defect_shift_base = None
             self.status.showMessage(f"预览错误：{e}")
             # 出错时也保证三栏有图（而不是第三栏空白）
             self.preview.set_images(self.current_image, seg_overlay,
@@ -1513,6 +1608,13 @@ class MainWindow(QMainWindow):
                                          region_masks=region_masks,
                                          region_hint=self._draw_hint(),
                                          scratch_paths=paths)
+            # 与预览保持一致：把「缺陷位置微调」的累计偏移同样应用到保存结果
+            _ox, _oy = getattr(self, "_defect_offset", (0, 0))
+            if (_ox or _oy) and applied and getattr(self, "_defect_shift_base", None):
+                img = np.clip(_shift_arr(img.astype(np.float32), _ox, _oy),
+                              0, 255).astype(np.uint8)
+                for r in applied:
+                    r.mask = _shift_arr(r.mask, _ox, _oy)
             if not applied:
                 QMessageBox.information(
                     self, "未生成缺陷",
@@ -1704,25 +1806,39 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "载入失败", "无法读取该参数文件。")
 
     def _apply_preset(self, data: dict):
-        for kind, cfg in (data.get("settings") or {}).items():
-            page = self.pages.get(kind)
-            if not page:
-                continue
-            page.enable.setChecked(bool(cfg.get("enable", True)))
-            for k, v in cfg.items():
-                if k in page.rows:
-                    page.rows[k].setValue(v)
-                elif k in page.combos:
-                    i = page.combos[k].findData(v)
-                    if i >= 0:
-                        page.combos[k].setCurrentIndex(i)
-            # 自定义异色目标色：恢复取色按钮的色板
-            if "color_rgb" in cfg and getattr(page, "btn_color", None) is not None:
-                try:
-                    page.color_rgb = tuple(int(x) for x in cfg["color_rgb"])
-                    page._apply_color_swatch()
-                except Exception:
-                    pass
+        # 预设可能含多个启用类型，但互斥规则要求只能开一个：
+        # 加锁批量应用，只保留第一个启用的类型
+        self._mutual_lock = True
+        try:
+            first_on = None
+            for kind, cfg in (data.get("settings") or {}).items():
+                page = self.pages.get(kind)
+                if not page:
+                    continue
+                want_on = bool(cfg.get("enable", True))
+                if want_on and first_on is None:
+                    first_on = kind
+                page.enable.setChecked(False)     # 先全部关掉，稍后只开第一个
+                for k, v in cfg.items():
+                    if k in page.rows:
+                        page.rows[k].setValue(v)
+                    elif k in page.combos:
+                        i = page.combos[k].findData(v)
+                        if i >= 0:
+                            page.combos[k].setCurrentIndex(i)
+                # 自定义异色目标色：恢复取色按钮的色板
+                if "color_rgb" in cfg and getattr(page, "btn_color", None) is not None:
+                    try:
+                        page.color_rgb = tuple(int(x) for x in cfg["color_rgb"])
+                        page._apply_color_swatch()
+                    except Exception:
+                        pass
+            if first_on is not None:
+                self.pages[first_on].enable.setChecked(True)
+        finally:
+            self._mutual_lock = False
+        self._update_mode_availability()
+        self._sync_tab_titles()
         if "images_per_input" in data:
             self.sp_count.setValue(int(data["images_per_input"]))
         if "seed" in data:
@@ -1776,14 +1892,16 @@ HELP_TEXT = """\
      **划痕沿这条线生成，起止位置与手绘一致**。
    · **画矩形区域**：拖拽画框，按住 **Ctrl 左键拖动**可旋转，
      也可用第二行的「ROI角度」输入框或「＋90° / －90°」精确调整。
-   · **画多边形**：逐点点击，点回起点或双击 / 右键 / 回车闭合。
    · **画笔涂抹**：按住左键自由涂抹（笔刷大小可调，笔刷仅在该模式下出现）。
    手绘范围与产品区域**固定取交集**，画到产品外的部分不会生成缺陷。
-   线条只服务于划痕；脏污 / 异色 / 缺角只认矩形框、多边形、画笔。
-   没画完的线条 / 多边形，点「刷新预览」或切换绘制模式时会自动提交。
-3. 「2 · 缺陷图生成配置」卡片顶部就是**四个缺陷名的 Tab 分页**（● 已启用 / ○ 未启用），
+   绘制方式随启用的缺陷类型自动限制：**启用划痕 → 只能画线条**；
+   **启用其它类型 → 只能画矩形 / 画笔**。
+   没画完的线条，点「缺陷生成预览」或切换绘制模式时会自动提交。
+3. 「2 · 缺陷图生成配置」卡片顶部是缺陷名 Tab 分页，**启用开关就是每个
+   Tab 标签上的复选框**（同时只能启用一个缺陷类型；若再开另一个会弹窗提示，
+   需先关闭当前已启用的类型）。
    在各 Tab 内配置参数（明显度、强度、数量等），预览实时刷新。
-   **划痕默认开启**，脏污 / 异色 / 缺角默认关闭（需勾选各页内的「启用」复选框）。
+   **划痕默认开启**，其它类型默认关闭。
    · 数量（条数 / 斑块数 / 区域数 / 缺角数）默认 1。画了 N 条线时，
      「条数」表示**每条线生成几条平行划痕**；
    · 划痕「弯曲度」0=近直线、1=明显蜿蜒（仅未画线、按区域方向自动生成时生效）；

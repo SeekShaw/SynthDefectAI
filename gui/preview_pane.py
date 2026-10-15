@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from PyQt6.QtCore import QPointF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
                              QFrame, QHBoxLayout, QLabel, QPushButton,
                              QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget)
@@ -32,6 +32,7 @@ class PreviewPane(QWidget):
     rectAngleChanged = pyqtSignal(float)    # ROI 框角度（度）
     posModeChanged = pyqtSignal(str)        # 缺陷位置方式变化
     overlayChanged = pyqtSignal()           # 轮廓颜色/线宽/显隐变化
+    defectMove = pyqtSignal(int, int)       # 缺陷位置微调 (dx, dy) 像素
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -194,19 +195,29 @@ class PreviewPane(QWidget):
         self.cb_draw = QCheckBox("限定手绘区域")
         self.cb_draw.setChecked(True)          # 默认开启
         self.cb_draw.setToolTip("缺陷只在手绘范围内生成（划痕沿手绘线条，"
-                                 "脏污/异色/缺角在手绘的矩形·多边形·画笔内）")
+                                 "其它缺陷在手绘的矩形·画笔内）")
         self.cb_draw.toggled.connect(self._on_draw_toggle)
         bar.addWidget(self.cb_draw)
 
+        # 绘制方式下拉：多边形已按需求删除；
+        # 用 QStandardItemModel 以便按启用的缺陷类型禁用个别项
+        # （划痕启用 → 只能画线条；其它类型启用 → 只能画矩形/画笔）
         self.cmb_mode = QComboBox()
-        self.cmb_mode.addItem("浏览", ImageView.MODE_VIEW)
-        self.cmb_mode.addItem("画线条（划痕）", ImageView.MODE_LINE)
-        self.cmb_mode.addItem("画矩形区域", ImageView.MODE_RECT)
-        self.cmb_mode.addItem("画多边形", ImageView.MODE_POLY)
-        self.cmb_mode.addItem("画笔涂抹", ImageView.MODE_BRUSH)
+        _m = QStandardItemModel(self.cmb_mode)
+        for _txt, _data in (("浏览", ImageView.MODE_VIEW),
+                            ("画线条（划痕）", ImageView.MODE_LINE),
+                            ("画矩形区域", ImageView.MODE_RECT),
+                            ("画笔涂抹", ImageView.MODE_BRUSH)):
+            _it = QStandardItem(_txt)
+            _it.setData(_data, Qt.ItemDataRole.UserRole)
+            _m.appendRow(_it)
+        self.cmb_mode.setModel(_m)
         self.cmb_mode.setFixedWidth(150)
         self.cmb_mode.setToolTip("线条：划痕专用（可拖动或逐点点击，起止点即划痕起止点）\n"
-                                 "矩形/多边形/画笔：脏污、异色、缺角的区域限定")
+                                 "矩形/画笔：其它缺陷的区域限定\n"
+                                 "可用方式随启用的缺陷类型自动限制：\n"
+                                 "　· 启用划痕 → 只能画线条\n"
+                                 "　· 启用其它类型 → 只能画矩形 / 画笔")
         self.cmb_mode.currentIndexChanged.connect(self._on_mode)
         bar.addWidget(self.cmb_mode)
 
@@ -266,7 +277,7 @@ class PreviewPane(QWidget):
         self._rot_r = b_rot_r
 
     def _bar_zoom(self) -> QHBoxLayout:
-        """缩放工具行（ROI 角度已移到「清除手绘」右侧那一行）。"""
+        """缩放工具行 + 缺陷位置像素级微调按钮。"""
         bar = QHBoxLayout()
         bar.setSpacing(6)
 
@@ -275,11 +286,13 @@ class PreviewPane(QWidget):
         b_out.setToolTip("缩小")
         b_out.clicked.connect(lambda: self.zoom_all(1 / 1.25))
         bar.addWidget(b_out)
-        b_1to1 = QPushButton("1:1")
-        b_1to1.setToolTip("按1 图像像素 = 1 屏幕像素显示")
+        b_1to1 = QPushButton("100%显示")
+        b_1to1.setFixedWidth(88)
+        b_1to1.setToolTip("按 1 图像像素 = 1 屏幕像素显示（100%）")
         b_1to1.clicked.connect(self.zoom_1to1)
         bar.addWidget(b_1to1)
-        b_fit = QPushButton("适应窗口")
+        b_fit = QPushButton("适应窗口显示")
+        b_fit.setFixedWidth(116)
         b_fit.setToolTip("三栏都缩放到刚好放下整图")
         b_fit.clicked.connect(self.fit_all)
         bar.addWidget(b_fit)
@@ -288,6 +301,29 @@ class PreviewPane(QWidget):
         b_in.setToolTip("放大")
         b_in.clicked.connect(lambda: self.zoom_all(1.25))
         bar.addWidget(b_in)
+
+        # ---- 缺陷位置微调（像素级，单击一次移动 1px，按住不放持续移动） ----
+        bar.addSpacing(10)
+        t_mv = QLabel("缺陷位置")
+        t_mv.setProperty("role", "title")
+        t_mv.setToolTip("把最近一次生成的缺陷整体平移（单位：像素 px）。\n"
+                        "单击一次移动 1px；按住不松则连续移动，松开停止。\n"
+                        "偏移会同步应用到「保存缺陷图」。")
+        bar.addWidget(t_mv)
+        self.btn_move = {}
+        _dirs = (("←", "左", -1, 0), ("→", "右", 1, 0),
+                 ("↑", "上", 0, -1), ("↓", "下", 0, 1))
+        for label, cn, dx, dy in _dirs:
+            b = QPushButton(label)
+            b.setFixedWidth(40)
+            b.setToolTip(f"缺陷位置{cn}移（每次 1px；按住不放持续移动，松开停止）")
+            b.setAutoRepeat(True)
+            b.setAutoRepeatDelay(350)      # 按住 350ms 后开始连续移动
+            b.setAutoRepeatInterval(30)    # 连续移动间隔 30ms（约 33px/秒）
+            b.clicked.connect(lambda _=False, d=dx, e=dy: self.defectMove.emit(d, e))
+            self.btn_move[(dx, dy)] = b
+            bar.addWidget(b)
+        bar.addStretch(1)     # 行尾弹性：让微调按钮组紧跟「＋」而不是被撑到行尾
         return bar
 
     def _bar_info(self) -> QHBoxLayout:
@@ -468,9 +504,61 @@ class PreviewPane(QWidget):
                 v._offset = QPointF(ref._offset)
                 v.update()
 
+    # ---------------- 模式可用性（随启用的缺陷类型联动） ----------------
+    def _mode_item(self, idx: int):
+        m = self.cmb_mode.model()
+        return m.item(idx) if hasattr(m, "item") else None
+
+    @staticmethod
+    def allowed_modes(scratch_on: bool, any_on: bool) -> set:
+        """按启用的缺陷类型计算可用绘制方式。
+
+        · 划痕启用 → 只能画线条（其它方式不可选）
+        · 其它类型启用 → 只能画矩形 / 画笔
+        · 没有启用任何类型 → 线条 / 矩形 / 画笔都可用
+        """
+        allowed = {ImageView.MODE_VIEW}
+        if not any_on:
+            allowed |= {ImageView.MODE_LINE, ImageView.MODE_RECT,
+                        ImageView.MODE_BRUSH}
+        elif scratch_on:
+            allowed |= {ImageView.MODE_LINE}
+        else:
+            allowed |= {ImageView.MODE_RECT, ImageView.MODE_BRUSH}
+        return allowed
+
+    def set_mode_availability(self, scratch_on: bool, any_on: bool):
+        """禁用不可用的绘制方式，并把当前模式切到最近的可用项。"""
+        allowed = self.allowed_modes(scratch_on, any_on)
+        for i in range(self.cmb_mode.count()):
+            it = self._mode_item(i)
+            if it is not None:
+                it.setEnabled(self.cmb_mode.itemData(i) in allowed)
+        self.ensure_valid_mode()
+
+    def _mode_allowed_now(self, mode: str) -> bool:
+        m = self.cmb_mode.model()
+        for i in range(self.cmb_mode.count()):
+            if self.cmb_mode.itemData(i) == mode:
+                it = m.item(i) if hasattr(m, "item") else None
+                return bool(it is None or it.isEnabled())
+        return False
+
+    def ensure_valid_mode(self):
+        """当前绘制方式被禁用时，自动切到第一个可用的绘制方式。"""
+        if not self.cb_draw.isChecked():
+            return
+        if self._mode_allowed_now(self.cmb_mode.currentData()):
+            return
+        for i in range(self.cmb_mode.count()):
+            data = self.cmb_mode.itemData(i)
+            if data != ImageView.MODE_VIEW and self._mode_allowed_now(data):
+                self.cmb_mode.setCurrentIndex(i)
+                return
+
     # ---------------- 模式 ----------------
     def _on_mode(self, _idx: int):
-        # 切换模式前先提交上一个模式未完成的线条/多边形，避免被丢弃
+        # 切换模式前先提交上一个模式未完成的线条，避免被丢弃
         self.commit_pending()
         mode = self.cmb_mode.currentData()
         # 只在第一栏开启绘制，其余两栏保持浏览
@@ -488,6 +576,7 @@ class PreviewPane(QWidget):
             self.clear_regions()
         else:
             self.cmb_mode.setCurrentIndex(1)   # 画线条（划痕专用）
+            self.ensure_valid_mode()
         self.modeChanged.emit(self.cmb_mode.currentData())
         self.drawToggled.emit(on)
 
@@ -504,5 +593,5 @@ class PreviewPane(QWidget):
                   getattr(self, "_rot_l", None), getattr(self, "_rot_r", None)):
             if w is not None:
                 w.setVisible(rect)
-        # 线条 / 多边形模式下才需要「结束当前线条」
-        self.btn_finish.setVisible(mode in (ImageView.MODE_LINE, ImageView.MODE_POLY))
+        # 线条模式下才需要「结束当前线条」（多边形方式已删除）
+        self.btn_finish.setVisible(mode == ImageView.MODE_LINE)
