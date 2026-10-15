@@ -5,9 +5,9 @@ from typing import List, Optional
 
 from PyQt6.QtCore import QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame,
-                             QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-                             QSlider, QSpinBox, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
+                             QFrame, QHBoxLayout, QLabel, QPushButton,
+                             QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
 from .image_view import ImageView
 
@@ -151,7 +151,10 @@ class PreviewPane(QWidget):
         return bar
 
     def _pick_outline_color(self):
-        from PyQt6.QtGui import QColorDialog
+        # ⚠️ QColorDialog 在 QtWidgets 里（不在 QtGui）。
+        #    之前误写成 `from PyQt6.QtGui import QColorDialog`，点击按钮时抛
+        #    ImportError —— 在 PyInstaller 打包的 exe 里该异常从 Qt 槽函数抛出
+        #    会直接导致进程 abort，表现为「点一下轮廓色就闪退」。
         c = QColorDialog.getColor(
             QColor(*self._outline_color), self, "选择产品轮廓颜色")
         if c.isValid():
@@ -219,6 +222,9 @@ class PreviewPane(QWidget):
         b_clr.clicked.connect(self.clear_regions)
         bar.addWidget(b_clr)
 
+        # ROI 角度（紧跟「清除手绘」右侧）—— 与手绘操作同属一组，放在一起更顺手
+        self._add_angle_widgets(bar)
+
         bar.addStretch(1)
 
         # 结束当前线条/多边形（点回起点、双击、右键、回车之外再给一个按钮）
@@ -229,11 +235,8 @@ class PreviewPane(QWidget):
         bar.addWidget(b_fin)
         return bar
 
-    def _bar_zoom(self) -> QHBoxLayout:
-        """缩放 + ROI 角度。ROI 角度只在矩形模式显示。"""
-        bar = QHBoxLayout()
-        bar.setSpacing(6)
-
+    def _add_angle_widgets(self, bar: QHBoxLayout):
+        """把「ROI角度 + ±90°」加入指定行（只在矩形模式显示）。"""
         self.lbl_angle = QLabel("ROI角度")
         self.lbl_angle.setToolTip("旋转矩形 ROI 的角度（度）。"
                                    "也可以在图上按住 Ctrl 左键拖动来旋转")
@@ -242,7 +245,7 @@ class PreviewPane(QWidget):
         self.sp_angle.setRange(-180, 180)
         self.sp_angle.setValue(0)
         self.sp_angle.setSuffix("°")
-        self.sp_angle.setFixedWidth(126)
+        self.sp_angle.setFixedWidth(112)
         self.sp_angle.setToolTip("ROI 矩形角度，0=水平；划痕会沿该方向生成")
         self.sp_angle.valueChanged.connect(self._on_angle_changed)
         bar.addWidget(self.sp_angle)
@@ -255,8 +258,14 @@ class PreviewPane(QWidget):
         b_rot_r.setFixedWidth(70)
         b_rot_r.clicked.connect(lambda: self.rotate_rect(90))
         bar.addWidget(b_rot_r)
+        # 存为实例属性：非矩形模式下要随 ROI角度 一起隐藏
+        self._rot_l = b_rot_l
+        self._rot_r = b_rot_r
 
-        bar.addStretch(1)
+    def _bar_zoom(self) -> QHBoxLayout:
+        """缩放工具行（ROI 角度已移到「清除手绘」右侧那一行）。"""
+        bar = QHBoxLayout()
+        bar.setSpacing(6)
 
         b_out = QPushButton("－")
         b_out.setFixedWidth(40)
@@ -488,9 +497,9 @@ class PreviewPane(QWidget):
         self.lbl_brush.setVisible(brush)
         self.sld_brush.setVisible(brush)
         rect = draw_on and mode == ImageView.MODE_RECT
-        for w in (self.lbl_angle, self.sp_angle):
-            w.setVisible(rect)
-        self._rot_btns = [b for b in (getattr(self, "_rot_l", None),
-                                     getattr(self, "_rot_r", None)) if b is not None]
+        for w in (self.lbl_angle, self.sp_angle,
+                  getattr(self, "_rot_l", None), getattr(self, "_rot_r", None)):
+            if w is not None:
+                w.setVisible(rect)
         # 线条 / 多边形模式下才需要「结束当前线条」
         self.btn_finish.setVisible(mode in (ImageView.MODE_LINE, ImageView.MODE_POLY))

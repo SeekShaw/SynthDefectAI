@@ -609,19 +609,15 @@ class MainWindow(QMainWindow):
         gb_in = QGroupBox("  1 · 输入设置  ")
         v = QVBoxLayout(gb_in)
         v.setSpacing(7)
+        # ① 选择图片 / 选择文件夹 / 清空 / 上一张 / 下一张 —— 合并为一行
         r1 = QHBoxLayout()
+        r1.setSpacing(6)
         b_file = QPushButton("选择图片…")
         b_file.clicked.connect(self.pick_files)
         b_dir = QPushButton("选择文件夹…")
         b_dir.clicked.connect(self.pick_dir)
         b_clr = QPushButton("清空")
         b_clr.clicked.connect(self.clear_inputs)
-        r1.addWidget(b_file)
-        r1.addWidget(b_dir)
-        r1.addWidget(b_clr)
-        v.addLayout(r1)
-        # 上一张 / 下一张
-        rn = QHBoxLayout()
         b_prev = QPushButton("◀ 上一张")
         b_prev.setToolTip("切换到上一张图片")
         b_prev.clicked.connect(lambda: self.step_image(-1))
@@ -630,19 +626,27 @@ class MainWindow(QMainWindow):
         b_next.clicked.connect(lambda: self.step_image(+1))
         self.btn_prev = b_prev
         self.btn_next = b_next
-        rn.addWidget(b_prev)
-        rn.addWidget(b_next)
-        rn.addStretch(1)
-        v.addLayout(rn)
+        for b in (b_file, b_dir, b_clr):
+            r1.addWidget(b)
+        r1.addSpacing(8)
+        r1.addWidget(b_prev)
+        r1.addWidget(b_next)
+        r1.addStretch(1)
+        v.addLayout(r1)
+
         self.lst = QListWidget()
         self.lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.lst.setMinimumHeight(96)
+        # 图片列表压到 ~130px：三张卡片是等高的，输入卡里列表最长，
+        # 列表每高一分就把下方「效果预览」挤掉一分（列表本身可滚动，不影响使用）。
+        self.lst.setMinimumHeight(84)
+        self.lst.setMaximumHeight(132)
         self.lst.currentRowChanged.connect(self.on_select_preview)
         v.addWidget(self.lst)
         self.lbl_count = QLabel("未选择任何图片")
         self.lbl_count.setProperty("role", "hint")
         v.addWidget(self.lbl_count)
 
+        # ② 缺陷样本增强模式 + 生成图片数量 —— 同一行（中间留出间距）
         # 缺陷样本增强模式：导入一张缺陷图 → 在预览上手绘大致区域 →
         # 在该区域内随机生成多个、随机类型 / 位置 / 形状的缺陷（批量扩充训练样本）
         self.cb_augment = QCheckBox("缺陷样本增强模式")
@@ -652,18 +656,17 @@ class MainWindow(QMainWindow):
             "缺陷类型/位置/形状随机；生成后在中间画廊点击缩略图可在右侧查看大图。\n"
             "未绘制区域时退化为整图随机生成。")
         self.cb_augment.toggled.connect(self._on_augment_toggled)
-        va = QHBoxLayout()
-        va.addWidget(self.cb_augment)
-        va.addStretch(1)
-        v.addLayout(va)
-
         ra = QHBoxLayout()
+        ra.setSpacing(6)
+        ra.addWidget(self.cb_augment)
+        ra.addSpacing(24)          # 与「生成图片数量」拉开距离
         ra.addWidget(QLabel("生成图片数量"))
         self.sp_aug_count = QSpinBox()
         self.sp_aug_count.setRange(1, 100)
         self.sp_aug_count.setValue(6)
         self.sp_aug_count.setSuffix(" 张")
         self.sp_aug_count.setEnabled(False)
+        self.sp_aug_count.setFixedWidth(96)
         ra.addWidget(self.sp_aug_count)
         ra.addStretch(1)
         v.addLayout(ra)

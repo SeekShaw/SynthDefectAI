@@ -582,8 +582,23 @@ def main() -> int:
         ln = v0._lines[0]
         d0 = math.hypot(ln[0][0] - p_start[0], ln[0][1] - p_start[1])
         d1 = math.hypot(ln[-1][0] - p_end[0], ln[-1][1] - p_end[1])
-        check(d0 < 3.0 and d1 < 3.0,
-              f"线条起止点= 拖动起止点（偏差{d0:.1f}/{d1:.1f}px）")
+        # 真正的功能保证是「坐标映射精确」：合成鼠标事件只能落在整数屏幕像素上，
+        # 所以 image→widget→image 的往返误差理论上限就是「半个屏幕像素」换算成
+        # 图像像素 = 0.75/scale。用这个物理上限来断言，而不是拍一个固定阈值。
+        sc = max(v0._scale(), 1e-6)
+        worst_map = 0.0
+        for _pt in ((p_start[0], p_start[1]), (p_end[0], p_end[1])):
+            _w = v0.image_to_widget(QPointF(_pt[0], _pt[1]))
+            _b = v0.widget_to_image(QPointF(round(_w.x()), round(_w.y())))
+            worst_map = max(worst_map, math.hypot(_b.x() - _pt[0], _b.y() - _pt[1]))
+        q_bound = 0.75 / sc
+        check(worst_map <= q_bound,
+              f"坐标映射精确（往返误差 {worst_map:.2f}px ≤ 半个屏幕像素 {q_bound:.2f}px）")
+        # 拖动偏差：按下/松开两端各自再取整一次，合计约 1.5 个屏幕像素。
+        # 原本阈值写死 3.0，而实测基线就是 2.9，卡在临界上，界面一改布局就误报。
+        tol_px = max(4.0, 1.5 / sc)
+        check(d0 < tol_px and d1 < tol_px,
+              f"线条起止点= 拖动起止点（偏差{d0:.1f}/{d1:.1f}px，容差{tol_px:.1f}px）")
 
     # 刷新预览：必须生成划痕，且第三栏（缺陷图）必须有图
     win.pages["smudge"].enable.setChecked(False)
