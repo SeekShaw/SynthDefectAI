@@ -735,6 +735,9 @@ class MainWindow(QMainWindow):
         self.preview.drawToggled.connect(self._on_draw_toggled)
         self.preview.rectAngleChanged.connect(self._on_rect_angle)
         self.preview.posModeChanged.connect(self._on_pos_mode_changed)
+        # 默认「按图像坐标位置」不执行产品轮廓检测 → 轮廓控件初始置灰
+        self.preview.set_outline_controls_enabled(
+            self.preview.pos_mode() == POS_MODE_PRODUCT)
         self.preview.overlayChanged.connect(self._refresh_overlay)
         self.preview.defectMove.connect(self._shift_defect)
         # 区域归属：区域画在哪个缺陷页就归哪个类型；各类型区域数量=其「生成数量」
@@ -1382,10 +1385,22 @@ class MainWindow(QMainWindow):
         return self.preview.pos_mode()
 
     def _on_pos_mode_changed(self, mode: str):
-        """切换「产品轮廓内 / 图像坐标」。两种模式的区域来源不同，需重算。"""
+        """切换「产品轮廓内 / 图像坐标」。两种模式的区域来源不同，需重算。
+
+        「按图像坐标位置」不执行产品轮廓检测 → 轮廓控件置灰；
+        切回「限定在产品轮廓内」重新检测并恢复可用。
+        """
         self._seg_key = None
         self._seg_res = None
+        self.preview.set_outline_controls_enabled(mode == POS_MODE_PRODUCT)
+        self._refresh_overlay()
         self.schedule_preview()
+        self.status.showMessage(
+            "缺陷位置：限定在产品轮廓内（检测并显示产品轮廓，"
+            "缺陷 = 产品表面 ∩ 手绘区域）"
+            if mode == POS_MODE_PRODUCT else
+            "缺陷位置：按图像坐标位置（不执行产品轮廓检测，"
+            "手绘区域像素坐标直接生效）")
         self.status.showMessage(
             "缺陷位置：限定在产品轮廓内（缺陷 = 产品表面 ∩ 手绘区域）"
             if mode == POS_MODE_PRODUCT else
@@ -1441,10 +1456,14 @@ class MainWindow(QMainWindow):
         if self.current_image is None:
             return
         h, w = self.current_image.shape[:2]
-        # 两种模式都画产品轮廓：在「图像坐标」模式下轮廓仅供对照参考，
-        # 不参与缺陷落点计算，因此产品识别不准也不影响结果。
-        seg = self._ensure_segmentation()
-        show_p = self.preview.show_product_outline() and seg is not None
+        # 产品轮廓只在「限定在产品轮廓内」模式下检测与显示；
+        # 「按图像坐标位置」不执行产品识别（省算力，轮廓也不参与落点计算）。
+        if self._pos_mode() == POS_MODE_PRODUCT:
+            seg = self._ensure_segmentation()
+            show_p = self.preview.show_product_outline() and seg is not None
+        else:
+            seg = None
+            show_p = False
         show_d = self.preview.show_draw_area()
         if not show_p and not show_d:
             self.preview.set_overlay(None)
@@ -1721,7 +1740,7 @@ class MainWindow(QMainWindow):
             return
         # 用户可能画完线还没双击/回车结束就先点了刷新 —— 这里帮他提交
         self.preview.commit_pending()
-        # 产品轮廓 / 限定范围叠加层：两种模式都画（先画好，之后切换模式不必重算分割）
+        # 产品轮廓 / 限定范围叠加层：「按图像坐标位置」不执行产品轮廓检测
         self._refresh_overlay()
         if self.cb_augment.isChecked():
             self._defect_shift_base = None     # 增强模式不支持位置微调
@@ -1730,9 +1749,11 @@ class MainWindow(QMainWindow):
         # 非增强模式：清空画廊，缺陷图同步显示在右侧缺陷视图
         self.gallery.set_thumbnails([])
         settings = self.current_settings()
-        seg = self._ensure_segmentation()
+        # 「按图像坐标位置」不做产品识别（seg=None）；像素掩膜路径不依赖 seg
+        seg = (self._ensure_segmentation()
+               if self._pos_mode() == POS_MODE_PRODUCT else None)
         seg_overlay = None
-        if seg is not None and seg.ok and self._pos_mode() == POS_MODE_PRODUCT:
+        if seg is not None and seg.ok:
             seg_overlay = region_overlay(self.current_image, seg)
 
         # 划痕只认「手绘线条」：勾选了划痕但没画线时跳过，并在信息栏提示
@@ -1882,7 +1903,9 @@ class MainWindow(QMainWindow):
             if scratch_on and self.preview.draw_enabled() and not paths:
                 settings = {k: dict(v) for k, v in settings.items()}
                 settings["scratch"]["enable"] = False
-            seg = self._ensure_segmentation()
+            # 与预览一致：「按图像坐标位置」不执行产品轮廓检测
+            seg = (self._ensure_segmentation()
+                   if self._pos_mode() == POS_MODE_PRODUCT else None)
             region_masks = self._region_masks_for(seg)
             # 与预览一致：算不出可用区域时直接不生成，避免缺陷洒满整图
             if self._draw_mask() is not None and region_masks is None:
@@ -2203,10 +2226,11 @@ HELP_HTML = """\
 <p><span class="step">第4步　选择生成方式（缺陷位置）</span>
 <table cellpadding="1" cellspacing="0">
 <tr><td valign="top">　· <b>按图像坐标位置</b>（默认）：</td>
-<td>想在图像哪个位置生成缺陷，就把绘制区域画在哪。<br>
+<td>想在图像哪个位置生成缺陷，就把绘制区域画在哪；<b>不执行产品轮廓检测</b>。<br>
 　　微调位置：点击 <b>上移 / 下移 / 左移 / 右移</b> 按钮，每点击一次移动 <span class="kw">1 个像素</span>。</td></tr>
 <tr><td valign="top">　· <b>限定在产品轮廓内</b>：</td>
-<td><span class="note">目前产品识别算法受图像质量影响较大，会识别不准，<b>不建议使用</b>；<br>
+<td>此模式下才执行<b>产品轮廓检测并显示</b>（「显示产品轮廓」等控件仅在此时可用）。<br>
+<span class="note">目前产品识别算法受图像质量影响较大，会识别不准，<b>不建议使用</b>；<br>
 　　后续会增强产品的定位检测功能。</span></td></tr>
 </table></p>
 <p><span class="step">第5步　选择绘制方式</span><br>

@@ -205,6 +205,21 @@ class PreviewPane(QWidget):
     def show_product_outline(self) -> bool:
         return self.cb_show_outline.isChecked()
 
+    def set_outline_controls_enabled(self, on: bool):
+        """「按图像坐标位置」模式不执行产品轮廓检测 → 轮廓控件整体置灰。
+
+        切回「限定在产品轮廓内」后恢复可用（勾选状态本身保留不动）。
+        """
+        for wdg in (self.cb_show_outline, self.btn_outline_color,
+                    self.sp_outline_w, self.lbl_outline_color,
+                    self.lbl_outline_w):
+            wdg.setEnabled(on)
+        self.cb_show_outline.setToolTip(
+            "在预览图上用明显的线条描出识别到的产品轮廓"
+            if on else
+            "「按图像坐标位置」模式下不执行产品轮廓检测；"
+            "切换到「限定在产品轮廓内」后可检测并显示")
+
     def show_draw_area(self) -> bool:
         return self.cb_show_drawarea.isChecked()
 
