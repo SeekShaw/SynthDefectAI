@@ -62,6 +62,19 @@ class BaseDefect:
         self.severity_mult = float(np.clip(severity_mult, 0.05, 1.0))
         self.params = params
 
+    def _inst(self, idx: int) -> dict:
+        """第 idx 个缺陷实例的参数覆盖（GUI「调整第几处」下发）。
+
+        params["per_instance"] 是按实例顺序的参数字典列表；
+        缺失 / 越界 / 非字典时返回空字典 = 完全沿用基础参数。
+        """
+        pi = self.params.get("per_instance")
+        if isinstance(pi, (list, tuple)) and 0 <= idx < len(pi):
+            ov = pi[idx]
+            if isinstance(ov, dict):
+                return ov
+        return {}
+
     def render(self, rgb: np.ndarray, rng: Rng,
                region: Optional[np.ndarray] = None,
                hint=None) -> DefectResult:  # pragma: no cover
@@ -126,30 +139,39 @@ def _mask_direction(mask: Optional[np.ndarray]) -> Optional[Tuple[float, float]]
 class ScratchDefect(BaseDefect):
     kind = "scratch"
 
+    def _scratch_params(self, ov: dict, strength: float) -> ScratchParams:
+        """构建 ScratchParams：基础参数 ∪ 单实例覆盖 ``ov``（可为空）。"""
+        s = float(np.clip(strength, 0.0, 1.0))
+        sv = self.severity_mult
+        g = lambda k, d: ov.get(k, self.params.get(k, d))   # noqa: E731
+        tone = float(np.clip(g("tone", 0.0), -1.0, 1.0))
+        return ScratchParams(
+            # 数量参数即最终条数（不再随强度浮动），避免「设 1 却出 3 条」的错觉
+            count=max(1, int(g("count", 1))),
+            length_ratio=g("length_ratio", 0.55),
+            width_px=g("width_px", 2.2) * (0.6 + 1.1 * s) * (0.5 + 0.5 * sv),
+            curve=float(np.clip(g("curve", 0.55), 0.0, 1.0)),
+            tone=tone,
+            tone_depth=float(np.clip(g("tone_depth", 0.85), 0.05, 2.0)),
+            dark_ratio=g("dark_ratio", 0.45),
+            jitter=g("jitter", 1.6),
+            feather=g("feather", 1.2) + (1.0 - sv) * 1.3,
+        )
+
     def render(self, rgb: np.ndarray, rng: Rng,
                region: Optional[np.ndarray] = None,
                hint=None, paths=None) -> DefectResult:
         """生成划痕。
 
         paths 不为空（手绘线条模式）：沿每条手绘线生成，**起止位置与手绘一致**；
-        否则退回「沿生成区域方向」自由生成（批量流程无手绘时使用）。
+        此时「条数」= 允许画的线条数（上限在绘制端 FIFO 保证），**每条线 1 条划痕**；
+        否则退回「沿生成区域方向」自由生成（批量流程无手绘时使用），
+        此时「条数」= 生成条数。第 j 条线/条可用 per_instance[j] 单独调效果。
         """
         h, w = rgb.shape[:2]
         s = self.strength
         sv = self.severity_mult
-        tone = float(np.clip(self.params.get("tone", 0.0), -1.0, 1.0))
-        p = ScratchParams(
-            # 数量参数即最终条数（不再随强度浮动），避免「设 1 却出 3 条」的错觉
-            count=max(1, int(self.params.get("count", 1))),
-            length_ratio=self.params.get("length_ratio", 0.55),
-            width_px=self.params.get("width_px", 2.2) * (0.6 + 1.1 * s) * (0.5 + 0.5 * sv),
-            curve=float(np.clip(self.params.get("curve", 0.55), 0.0, 1.0)),
-            tone=tone,
-            tone_depth=float(np.clip(self.params.get("tone_depth", 0.85), 0.05, 2.0)),
-            dark_ratio=self.params.get("dark_ratio", 0.45),
-            jitter=self.params.get("jitter", 1.6),
-            feather=self.params.get("feather", 1.2) + (1.0 - sv) * 1.3,
-        )
+        p = self._scratch_params({}, self.strength)
 
         base = rgb.astype(np.float32) / 255.0
         total_mask = np.zeros((h, w), dtype=np.float32)
@@ -161,17 +183,20 @@ class ScratchDefect(BaseDefect):
         # ---------------- 模式 A：沿手绘线条（起止点一致） ----------------
         if paths:
             self.last_dir_source = "手绘线条"
-            for path in paths:
+            for j, path in enumerate(paths):
+                ov = self._inst(j)
+                pj = self._scratch_params(
+                    ov, float(ov.get("strength", self.strength)))
                 pts = self._resample_path(path, n=220)
                 if pts is None:
                     continue
-                for _ in range(p.count):
-                    lm, pol, gain = self._scratch_along((h, w), pts, p, rng, region)
-                    if lm is None:
-                        continue
-                    made += 1
-                    total_mask = np.maximum(total_mask, lm)
-                    total_shift += lm * pol * gain
+                # 「条数」= 允许画的线条数（绘制端按上限 FIFO），每条线 1 条划痕
+                lm, pol, gain = self._scratch_along((h, w), pts, pj, rng, region)
+                if lm is None:
+                    continue
+                made += 1
+                total_mask = np.maximum(total_mask, lm)
+                total_shift += lm * pol * gain
             if made == 0:
                 return DefectResult(image=rgb.copy(), mask=total_mask,
                                     kind=self.kind, count=0)
@@ -1302,6 +1327,7 @@ def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
         cfg.pop("enable", None)
         target = str(cfg.pop("target", "both"))
         severity = str(cfg.pop("severity", "mixed"))
+        per_inst = cfg.pop("per_instance", None) or []
         lo, hi = SEVERITY_LEVELS.get(severity, (0.12, 1.0))
         sv = rng.uniform(lo, hi)
         region = resolve_target(target, region_masks)
@@ -1312,8 +1338,34 @@ def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
         kw = {}
         if kind == "scratch":
             kw["paths"] = scratch_paths
-        res = gen(strength=strength, severity_mult=sv, **cfg).render(
-            img, rng, region=region, hint=region_hint, **kw)
+
+        if per_inst and (kind != "scratch" or not scratch_paths):
+            # ---- 每实例单独渲染：per_instance[j] 覆盖基础参数，数量固定 1 ----
+            # （划痕+手绘线条例外：在第 j 条线内逐条合并，见 ScratchDefect.render）
+            masks: List[np.ndarray] = []
+            for j, ov in enumerate(per_inst):
+                if not isinstance(ov, dict):
+                    continue
+                cj = dict(cfg)
+                cj.update(ov)
+                for ck in ("count", "blob_count", "region_count"):
+                    if ck in cj:
+                        cj[ck] = 1
+                st_j = float(cj.pop("strength", strength))
+                res_j = gen(strength=st_j, severity_mult=sv, **cj).render(
+                    img, rng, region=region, hint=region_hint)
+                img = res_j.image
+                masks.append(res_j.mask)
+            mask_all = (np.maximum.reduce(masks) if masks
+                        else np.zeros((img.shape[0], img.shape[1]), np.float32))
+            res = DefectResult(image=img, mask=clip01(mask_all),
+                               kind=kind, count=len(masks))
+        else:
+            if kind == "scratch" and per_inst:
+                # 划痕 + 手绘线：per_instance 留给渲染器按第 j 条线取覆盖
+                cfg["per_instance"] = per_inst
+            res = gen(strength=strength, severity_mult=sv, **cfg).render(
+                img, rng, region=region, hint=region_hint, **kw)
         res.kind = kind
         res.severity = severity
         res.surface = target

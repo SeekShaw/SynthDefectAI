@@ -181,6 +181,40 @@ def main() -> int:
     win.pages["smudge"].enable.setChecked(False)
     app.processEvents()
 
+    # ---- 需求：绘制区域数量上限 = 缺陷生成数量（超出 FIFO 淘汰最早的） ----
+    _pv0 = win.preview.views[0]
+    win.pages["scratch"].rows["count"].setValue(2)
+    app.processEvents()
+    check(_pv0._max_lines == 2,
+          f"线条上限=划痕条数（_max_lines={_pv0._max_lines}）")
+    for _j in range(3):
+        _pv0._lines.append([(10.0, 10.0 + _j), (60.0, 60.0 + _j)])
+        _pv0._cap_lines()
+    check(len(_pv0._lines) == 2,
+          f"画第 3 条线时最早的被淘汰（保持 {len(_pv0._lines)} 条）")
+    _pv0._lines.clear()
+    win.pages["scratch"].rows["count"].setValue(1)
+
+    # ---- 需求：数量 ≥2 时每实例可单独调整（「调整第几处」下拉） ----
+    _dp = win.pages["dot"]
+    _dp.rows["count"].setValue(3)
+    app.processEvents()
+    check(not _dp.cmb_inst.isHidden() and _dp.cmb_inst.count() == 3,
+          "数量=3 时「调整第几处」下拉出现且含 3 项")
+    _dp.cmb_inst.setCurrentIndex(1)
+    _dp.rows["darkness"].setValue(0.50)
+    _cfg3 = _dp.config()
+    check(abs(_cfg3["per_instance"][1]["darkness"] - 0.50) < 1e-6
+          and abs(_cfg3["per_instance"][0]["darkness"] - 0.88) < 1e-6,
+          "第 2 处单独调整 darkness，第 1 处保持基准值")
+    _dp.cmb_inst.setCurrentIndex(0)
+    check(abs(_dp.rows["darkness"].value() - 0.88) < 1e-6,
+          "切回第 1 处时控件显示该实例的生效值")
+    _dp.rows["count"].setValue(1)
+    app.processEvents()
+    check(_dp.cmb_inst.isHidden() and "per_instance" not in _dp.config(),
+          "数量回到 1 时选择器隐藏且不下发 per_instance")
+
     _m0 = win.preview.cmb_mode.model()
     check(not _m0.item(2).isEnabled() and not _m0.item(3).isEnabled(),
           "启用划痕时「画矩形区域 / 画笔涂抹」不可选（只能画线条）")

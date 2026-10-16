@@ -29,6 +29,7 @@ from .image_view import ImageView, np_to_qpixmap
 from .preview_pane import POS_MODE_PIXEL, POS_MODE_PRODUCT, PreviewPane
 
 _KIND_COLOR = dict(_KIND_TO_COLOR)   # 各缺陷类型在叠加图里的颜色
+_COUNT_KEY = {"smudge": "blob_count", "discolor": "region_count"}  # 其余为 count
 
 
 def _shift_arr(a: np.ndarray, dx: int, dy: int) -> np.ndarray:
@@ -152,6 +153,15 @@ class SliderRow(QWidget):
     def setValue(self, v: float):
         self.spin.setValue(v)
 
+    def setValueSilent(self, v: float):
+        """设值但不触发 valueChanged（切换单独调整的实例时使用）。"""
+        self.slider.blockSignals(True)
+        self.spin.blockSignals(True)
+        self.slider.setValue(self._to_slider(v))
+        self.spin.setValue(v)
+        self.slider.blockSignals(False)
+        self.spin.blockSignals(False)
+
 
 class DefectPage(QWidget):
     """单个缺陷类型的参数页（放入 Tab）。
@@ -227,7 +237,7 @@ class DefectPage(QWidget):
                            ("dust", "灰尘灰"), ("oil", "油污褐"), ("rust", "锈迹橙")]:
                 cb.addItem(txt, k)
             cb.setCurrentIndex(max(0, cb.findData(cfg.get("dirt_color", "auto"))))
-            cb.currentIndexChanged.connect(self._emit)
+            cb.currentIndexChanged.connect(lambda *_: self._on_param_changed("dirt_color"))
             self.combos["dirt_color"] = cb
             self._items.append(self._labeled("污染色", cb))
         elif kind == "discolor":
@@ -242,7 +252,7 @@ class DefectPage(QWidget):
             for txt, key in DISCOLOR_COLOR_OPTS:
                 cb.addItem(txt, key)
             cb.setCurrentIndex(max(0, cb.findData(cfg.get("color", "random"))))
-            cb.currentIndexChanged.connect(self._emit)
+            cb.currentIndexChanged.connect(lambda *_: self._on_param_changed("color"))
             self.combos["color"] = cb
             self._items.append(self._labeled("色调", cb))
             # 自定义取色按钮（仅「自定义」生效）
@@ -269,7 +279,7 @@ class DefectPage(QWidget):
             for k, txt in [("auto", "自动（深黑）"), ("custom", "自定义")]:
                 cb.addItem(txt, k)
             cb.setCurrentIndex(max(0, cb.findData(cfg.get("color", "auto"))))
-            cb.currentIndexChanged.connect(self._emit)
+            cb.currentIndexChanged.connect(lambda *_: self._on_param_changed("color"))
             self.combos["color"] = cb
             self._items.append(self._labeled("黑点颜色", cb))
             self.color_rgb = tuple(int(x) for x in cfg.get("color_rgb", [26, 22, 20]))
@@ -295,7 +305,7 @@ class DefectPage(QWidget):
             for k, txt in [("auto", "自动（同邻近区域）"), ("custom", "自定义")]:
                 cb.addItem(txt, k)
             cb.setCurrentIndex(max(0, cb.findData(cfg.get("color", "auto"))))
-            cb.currentIndexChanged.connect(self._emit)
+            cb.currentIndexChanged.connect(lambda *_: self._on_param_changed("color"))
             self.combos["color"] = cb
             self._items.append(self._labeled("鼓包颜色", cb))
             self.color_rgb = tuple(int(x) for x in cfg.get("color_rgb", [180, 170, 160]))
@@ -313,9 +323,19 @@ class DefectPage(QWidget):
                            ("fiber", "纤维/毛发")]:
                 cb.addItem(txt, k)
             cb.setCurrentIndex(max(0, cb.findData(cfg.get("color_mode", "auto"))))
-            cb.currentIndexChanged.connect(self._emit)
+            cb.currentIndexChanged.connect(lambda *_: self._on_param_changed("color_mode"))
             self.combos["color_mode"] = cb
             self._items.append(self._labeled("异物类型", cb))
+
+        # ---- 每实例单独调整（生成数量 ≥2 时启用，见「调整第几处」下拉） ----
+        self._count_key = {"smudge": "blob_count",
+                           "discolor": "region_count"}.get(kind, "count")
+        self._inst_over: dict[int, dict] = {}   # 实例下标 -> 参数覆盖
+        self._inst_cur = 0
+        self._inst_active = False
+        self._base = self._snapshot()
+        self._build_inst_selector()
+        self.rows[self._count_key].valueChanged.connect(self._on_count_changed)
 
         self._relayout()
         self.enable.toggled.connect(self._sync_enable)
@@ -371,9 +391,115 @@ class DefectPage(QWidget):
 
     def _add(self, key, label, vmin, vmax, value, step=0.01, integer=False):
         r = SliderRow(label, vmin, vmax, value, step=step, integer=integer)
-        r.valueChanged.connect(self._emit)
+        r.valueChanged.connect(lambda *_v, k=key: self._on_param_changed(k))
         self.rows[key] = r
         self._items.append(r)
+
+    # ---------------- 每实例单独调整（数量 ≥2 时） ----------------
+    def _snapshot(self) -> dict:
+        """当前控件值快照（作为各实例的基准参数）。"""
+        d = {k: (int(round(r.value())) if r._int else round(r.value(), 4))
+             for k, r in self.rows.items()}
+        for k, cb in self.combos.items():
+            d[k] = cb.currentData()
+        d["color_rgb"] = list(self.color_rgb)
+        return d
+
+    def _build_inst_selector(self):
+        """「调整第几处」下拉：放在「明显度」右侧，数量 ≥2 时才显示。"""
+        h = self.w_severity.layout()
+        h.addSpacing(10)
+        self.lbl_inst = QLabel("调整第几处")
+        self.lbl_inst.setFixedWidth(self.LABEL_W)
+        self.lbl_inst.setToolTip("生成数量 ≥2 时，可为每一处缺陷单独调整参数，\n"
+                                 "让几处缺陷效果有差异、更逼真。\n"
+                                 "未单独调过的参数沿用页面里的基准值。")
+        h.addWidget(self.lbl_inst)
+        self.cmb_inst = QComboBox()
+        self.cmb_inst.currentIndexChanged.connect(self._on_inst_switched)
+        h.addWidget(self.cmb_inst, 1)
+        self.lbl_inst.setVisible(False)
+        self.cmb_inst.setVisible(False)
+
+    def _on_count_changed(self, *_):
+        self._sync_inst_selector()
+        self._emit()
+
+    def _sync_inst_selector(self):
+        n = int(self.rows[self._count_key].value())
+        # 超出数量的覆盖直接丢弃
+        for k in [k for k in self._inst_over if k >= n]:
+            del self._inst_over[k]
+        if n >= 2:
+            if not self._inst_active:
+                # 首次进入多实例：以当前参数为基准，各实例先与基准一致
+                self._inst_active = True
+                self._base = self._snapshot()
+                self._inst_over = {}
+            self.lbl_inst.setVisible(True)
+            self.cmb_inst.setVisible(True)
+            if self.cmb_inst.count() != n:
+                self.cmb_inst.blockSignals(True)
+                self.cmb_inst.clear()
+                for i in range(n):
+                    self.cmb_inst.addItem(f"第{i + 1}处", i)
+                self.cmb_inst.setCurrentIndex(min(self._inst_cur, n - 1))
+                self.cmb_inst.blockSignals(False)
+            self._inst_cur = int(self.cmb_inst.currentData())
+        else:
+            self._inst_active = False
+            self._inst_over = {}
+            self._inst_cur = 0
+            self.lbl_inst.setVisible(False)
+            self.cmb_inst.setVisible(False)
+
+    def _merged(self, idx: int) -> dict:
+        """实例 idx 的生效参数 = 基准 ∪ 该实例的覆盖。"""
+        m = dict(self._base)
+        m.update(self._inst_over.get(idx, {}))
+        return m
+
+    def _on_inst_switched(self, _idx: int):
+        data = self.cmb_inst.currentData()
+        if data is None:
+            return
+        self._inst_cur = int(data)
+        self._show_inst(self._inst_cur)
+
+    def _show_inst(self, idx: int):
+        """把控件刷新为实例 idx 的生效参数（不发 changed 信号）。"""
+        m = self._merged(idx)
+        for k, r in self.rows.items():
+            if k == self._count_key or k not in m:
+                continue
+            r.setValueSilent(float(m[k]))
+        for k, cb in self.combos.items():
+            if k not in m:
+                continue
+            i = cb.findData(m[k])
+            if i >= 0:
+                cb.blockSignals(True)
+                cb.setCurrentIndex(i)
+                cb.blockSignals(False)
+        if "color_rgb" in m:
+            self.color_rgb = tuple(int(x) for x in m["color_rgb"])
+            self._apply_color_swatch()
+
+    def _on_param_changed(self, key: str, *_):
+        # 多实例模式下：编辑写入当前选中实例的覆盖（数量/明显度除外）
+        if (getattr(self, "_inst_active", False)
+                and key != self._count_key and key != "severity"):
+            if key in self.rows:
+                self._inst_over.setdefault(self._inst_cur, {})[key] = \
+                    int(round(self.rows[key].value())) if self.rows[key]._int \
+                    else round(self.rows[key].value(), 4)
+            elif key == "color_rgb":
+                self._inst_over.setdefault(self._inst_cur, {})[key] = \
+                    list(self.color_rgb)
+            elif key in self.combos:
+                self._inst_over.setdefault(self._inst_cur, {})[key] = \
+                    self.combos[key].currentData()
+        self._emit()
 
     def _sync_enable(self, on: bool):
         self.body.setEnabled(on)
@@ -389,6 +515,16 @@ class DefectPage(QWidget):
         for k, cb in self.combos.items():
             cfg[k] = cb.currentData()
         cfg["color_rgb"] = list(self.color_rgb)
+        # 生成数量 ≥2 时下发每实例参数（实例 j 的生效参数 = 基准 ∪ 覆盖）
+        if getattr(self, "_inst_active", False):
+            n = int(self.rows[self._count_key].value())
+            if n >= 2:
+                per = []
+                for i in range(n):
+                    m = self._merged(i)
+                    m.pop("severity", None)
+                    per.append(m)
+                cfg["per_instance"] = per
         return cfg
 
     def _apply_color_swatch(self):
@@ -424,6 +560,9 @@ class DefectPage(QWidget):
             idx = cb.findData("custom")
             if idx >= 0:
                 cb.setCurrentIndex(idx)
+        if getattr(self, "_inst_active", False):
+            self._inst_over.setdefault(self._inst_cur, {})["color_rgb"] = \
+                list(self.color_rgb)
         self._emit()
 
 
@@ -880,6 +1019,7 @@ class MainWindow(QMainWindow):
         for i, kind in enumerate(DEFECT_KINDS):
             page = DefectPage(kind, DEFAULT_SETTINGS[kind])
             page.changed.connect(self.schedule_preview)
+            page.changed.connect(self._sync_region_limits)
             self.pages[kind] = page
             self.tabs.addTab(page, KIND_CN[kind])
             self.tabs.tabBar().setTabButton(
@@ -947,6 +1087,30 @@ class MainWindow(QMainWindow):
         scratch_on = self.pages["scratch"].enable.isChecked()
         other_on = any(k != "scratch" for k in self._enabled_kinds())
         pv.set_mode_availability(scratch_on=scratch_on, other_on=other_on)
+        self._sync_region_limits()
+
+    def _sync_region_limits(self, *_):
+        """绘制数量上限 = 对应缺陷的「生成数量」：超出时 FIFO 淘汰最早画的。
+
+        · 线条上限 = 划痕「条数」（仅划痕启用时限制）
+        · 区域（矩形/画笔）上限 = 已启用的非划痕类型中最大的生成数量
+        """
+        pv = getattr(self, "preview", None)
+        if pv is None or not getattr(self, "pages", None):
+            return
+        try:
+            enabled = self._enabled_kinds()
+            line_cap = (int(self.pages["scratch"].config()["count"])
+                        if "scratch" in enabled else 0)
+            others = [k for k in enabled if k != "scratch"]
+            shape_cap = max(
+                (int(self.pages[k].config()[_COUNT_KEY.get(k, "count")])
+                 for k in others), default=0)
+        except Exception:
+            return
+        for v in pv.views:
+            v.set_max_lines(line_cap)
+            v.set_max_shapes(shape_cap)
 
     def _sync_defect_header(self, *_):
         """Tab 上的复选框即启用状态指示，这里只需刷新提示（状态栏）。"""
@@ -1942,8 +2106,13 @@ HELP_TEXT = """\
    改为 N 时最多可同时启用 N 个类型，弹窗提示数值随之联动）。
    在各 Tab 内配置参数（明显度、强度、数量等），预览实时刷新。
    **划痕默认开启**，其它类型默认关闭。
-   · 数量（条数 / 斑块数 / 区域数 / 缺角数）默认 1。画了 N 条线时，
-     「条数」表示**每条线生成几条平行划痕**；
+   · 数量（条数 / 斑块数 / 区域数 / 崩缺数 / 黑点数…）默认 1；
+     **数量也是原图中允许绘制的线条 / 区域个数上限**——画多了会自动
+     淘汰最早画的那个（比如条数=2 时画第 3 条线，第 1 条线被清除）；
+     画了 N 条线时，每条线生成 1 条划痕，起止位置与手绘一致；
+   · **数量 ≥2 时，「明显度」右侧出现「调整第几处」下拉**——选中第几处，
+     页面参数就对该处单独生效，让几处缺陷效果有差异、更逼真；
+     未单独调过的参数沿用页面基准值；数量为 1 时无此下拉；
    · 划痕「弯曲度」0=近直线、1=明显蜿蜒（仅未画线、按区域方向自动生成时生效）；
    · 划痕「颜色」-1=白 … +1=黑，0=随机暗/亮；「深浅」0.1~1.5 控制偏离原色的程度；
    · 脏污 / 异色的「边缘模糊」0~2.5，默认 1.0（边缘为渐变过渡，没有硬边）。

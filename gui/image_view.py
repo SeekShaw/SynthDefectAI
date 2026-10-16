@@ -63,6 +63,11 @@ class ImageView(QWidget):
         self._polys: List[List[Tuple[float, float]]] = []
         self._strokes: List[List[Tuple[float, float]]] = []
         self._cur_pts: List[Tuple[float, float]] = []
+        # 绘制数量上限（0 = 不限）：线条 / 区域分别由对应缺陷的「生成数量」决定，
+        # 超出上限时按 FIFO 淘汰最早画的那个（始终保持图中只有 N 个）
+        self._max_lines = 0
+        self._max_shapes = 0
+        self._shape_order: List[str] = []   # 区域插入顺序（rect/stroke/poly）
         self._drag_origin: Optional[QPointF] = None
         self._rot_idx: Optional[int] = None
         self._rot_center: Optional[QPointF] = None
@@ -140,8 +145,50 @@ class ImageView(QWidget):
         self._polys.clear()
         self._strokes.clear()
         self._cur_pts.clear()
+        self._shape_order.clear()
         self.regionChanged.emit()
         self.update()
+
+    # ---------------- 绘制数量上限 ----------------
+    def set_max_lines(self, n: int):
+        """线条数量上限（划痕「条数」）；0 = 不限。缩小上限时立即淘汰多余的。"""
+        self._max_lines = max(0, int(n))
+        self._cap_lines()
+        self.update()
+
+    def set_max_shapes(self, n: int):
+        """区域（矩形/画笔/多边形合计）数量上限；0 = 不限。"""
+        self._max_shapes = max(0, int(n))
+        self._cap_shapes()
+        self.update()
+
+    def _cap_lines(self):
+        if self._max_lines > 0:
+            while len(self._lines) > self._max_lines:
+                self._lines.pop(0)          # 淘汰最早的线条
+
+    def _cap_shapes(self):
+        if self._max_shapes <= 0:
+            return
+        while (len(self._rects) + len(self._strokes) + len(self._polys)
+               > self._max_shapes):
+            removed = False
+            if self._shape_order:
+                tag = self._shape_order.pop(0)
+                lst = {"rect": self._rects, "stroke": self._strokes,
+                       "poly": self._polys}.get(tag)
+                if lst:
+                    lst.pop(0)              # 淘汰最早画的区域
+                    removed = True
+            if not removed:
+                if self._rects:
+                    self._rects.pop(0)
+                elif self._strokes:
+                    self._strokes.pop(0)
+                elif self._polys:
+                    self._polys.pop(0)
+                else:
+                    break
 
     def has_regions(self) -> bool:
         return bool(self._rects or self._lines or self._polys or self._strokes)
@@ -170,6 +217,8 @@ class ImageView(QWidget):
             self._polys.append(list(self._cur_pts))
             self._last_kind = "poly"
             self._cur_pts = []
+            self._shape_order.append("poly")
+            self._cap_shapes()
             self.regionChanged.emit()
             self.update()
             return True
@@ -177,6 +226,7 @@ class ImageView(QWidget):
             self._lines.append(list(self._cur_pts))
             self._last_kind = "line"
             self._cur_pts = []
+            self._cap_lines()
             self.regionChanged.emit()
             self.update()
             return True
@@ -522,12 +572,16 @@ class ImageView(QWidget):
                 self._rects.append(((x0 + x1) / 2.0, (y0 + y1) / 2.0,
                                     rw, rh, 0.0))
                 self._last_kind = "rect"
+                self._shape_order.append("rect")
+                self._cap_shapes()
                 self.regionChanged.emit()
             self._drag_origin = None
         elif self.mode == self.MODE_BRUSH and self._cur_pts:
             if len(self._cur_pts) >= 1:
                 self._strokes.append(self._cur_pts)
                 self._last_kind = "stroke"
+                self._shape_order.append("stroke")
+                self._cap_shapes()
                 self.regionChanged.emit()
             self._cur_pts = []
         elif self.mode == self.MODE_LINE and len(self._cur_pts) >= 2:
@@ -535,6 +589,7 @@ class ImageView(QWidget):
             self._lines.append(list(self._cur_pts))
             self._last_kind = "line"
             self._cur_pts = []
+            self._cap_lines()
             self.regionChanged.emit()
         self.drawingFinished.emit()
         self.update()
