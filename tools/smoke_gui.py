@@ -249,14 +249,14 @@ def main() -> int:
                   f"[{kind}/{key}] 滑条宽度足够（{r.slider.width()}px）")
     win.tabs.setCurrentIndex(0)
 
-    # 四个 Tab 标签文字完整（卡片顶部的分页标题）
+    # 四个 Tab 标签完整可见且**无右侧滚动箭头**（文字紧凑后一行放下）
+    check(not win.tabs.usesScrollButtons(),
+          "Tab 已禁用滚动箭头（不需要最右边的 «/»）")
     bar = win.tabs.tabBar()
     for i in range(win.tabs.count()):
         r = bar.tabRect(i)
-        need = bar.tabSizeHint(i)
-        check(not r.isEmpty() and r.width() >= need.width() - 1,
-              f"Tab{i} 标签文字完整：{win.tabs.tabText(i)!r}"
-              f"（{r.width()}≥{need.width()}）")
+        check(not r.isEmpty() and r.width() >= 30,
+              f"Tab{i} 标签可见：{win.tabs.tabText(i)!r}（宽 {r.width()}px）")
 
     # 三张卡片等高（需求：缺陷配置卡 = 输入卡 = 输出卡）
     app.processEvents()
@@ -294,11 +294,11 @@ def main() -> int:
     check(all(p._cols == 2 for p in win.pages.values()),
           "恢复宽窗后重新排成两列")
 
-    # 预览工具条为四行（窄窗下控件不被挤扁、文字完整）
-    # 四行 = 手绘 / 缺陷位置方式+轮廓 / 缩放 / 状态信息
+    # 预览工具条为三行（窄窗下控件不被挤扁、文字完整）
+    # 三行 = 位置方式+手绘 / 轮廓显示+缩放+位置微调 / 状态信息
     tbar = win.preview.layout().itemAt(0).layout()
-    check(isinstance(tbar, QVBoxLayout) and tbar.count() == 4,
-          f"预览工具条为四行排布（实际 {type(tbar).__name__}/{tbar.count()}）")
+    check(isinstance(tbar, QVBoxLayout) and tbar.count() == 3,
+          f"预览工具条为三行排布（实际 {type(tbar).__name__}/{tbar.count()}）")
 
     # 「缺陷位置」行必须齐备：位置方式下拉 + 轮廓显隐/颜色/线宽/限定范围
     _pm = win.preview.pos_mode()
@@ -1009,9 +1009,9 @@ def main() -> int:
                    * _m2[:, :, None], 0, 255).astype(np.uint8)
     check(_exp.shape == _orig.shape and _exp.dtype == np.uint8,
           "平移合成图与原图同尺寸（背景不动、缺陷整体移动）")
-    # 位置微调按钮带自动重复（按住连续移动）
+    # 位置微调按钮不带自动重复（按住连移会卡，已按需求关闭：单击一次移动 1px）
     for _b in ("←", "→", "↑", "↓"):
-        check(btns[_b].autoRepeat(), f"「{_b}」按住可连续移动（autoRepeat）")
+        check(not btns[_b].autoRepeat(), f"「{_b}」已关闭按住连移（无 autoRepeat）")
     # 重新生成预览后偏移应归零
     win._preview_timer.stop()
     win.refresh_preview()

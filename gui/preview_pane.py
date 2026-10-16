@@ -76,7 +76,7 @@ class PreviewPane(QWidget):
 
     # ---------------- 工具栏 ----------------
     def _build_bar(self) -> QVBoxLayout:
-        """三条工具行：① 手绘与 ROI ② 缩放③ 状态信息。
+        """三条工具行：① 位置方式+手绘与 ROI ② 轮廓显示+缩放+位置微调 ③ 状态信息。
 
         控件按「当前绘制模式」动态显隐（画笔滑条仅涂抹模式、ROI角度仅矩形模式），
         否则一行放不下会被挤扁（QBoxLayout 空间不足时压固定宽度子项）。
@@ -85,22 +85,20 @@ class PreviewPane(QWidget):
         wrap.setContentsMargins(0, 0, 0, 0)
         wrap.setSpacing(6)
         wrap.addLayout(self._bar_draw())
-        wrap.addLayout(self._bar_posmode())
         wrap.addLayout(self._bar_zoom())
         wrap.addLayout(self._bar_info())
         self._sync_brush_enabled()
         return wrap
 
-    def _bar_posmode(self) -> QHBoxLayout:
-        """缺陷位置方式：产品轮廓内 / 图像坐标 + 轮廓显示设置。"""
+    def _bar_draw(self) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.setSpacing(6)
 
-        t = QLabel("缺陷位置")
-        t.setProperty("role", "title")
-        bar.addWidget(t)
+        # ---- 缺陷位置方式（在「效果预览」左侧同一行） ----
+        t_pos = QLabel("缺陷位置")
+        t_pos.setProperty("role", "title")
+        bar.addWidget(t_pos)
 
-        # ---- 位置方式 ----
         self.cmb_posmode = QComboBox()
         self.cmb_posmode.addItem("限定在产品轮廓内", POS_MODE_PRODUCT)
         self.cmb_posmode.addItem("按图像坐标位置", POS_MODE_PIXEL)
@@ -118,74 +116,6 @@ class PreviewPane(QWidget):
 
         bar.addSpacing(10)
 
-        # ---- 轮廓显示 ----
-        self.cb_show_outline = QCheckBox("显示产品轮廓")
-        self.cb_show_outline.setChecked(True)
-        self.cb_show_outline.setToolTip("在预览图上用明显的线条描出识别到的产品轮廓")
-        self.cb_show_outline.toggled.connect(lambda _v: self.overlayChanged.emit())
-        bar.addWidget(self.cb_show_outline)
-
-        self.lbl_outline_color = QLabel("轮廓色")
-        bar.addWidget(self.lbl_outline_color)
-        self.btn_outline_color = QPushButton("■")
-        self.btn_outline_color.setFixedSize(46, 24)
-        self.btn_outline_color.setToolTip("点击选择产品轮廓线的颜色")
-        self._outline_color = (255, 80, 80)
-        self.btn_outline_color.clicked.connect(self._pick_outline_color)
-        bar.addWidget(self.btn_outline_color)
-
-        self.lbl_outline_w = QLabel("线宽")
-        bar.addWidget(self.lbl_outline_w)
-        self.sp_outline_w = QSpinBox()
-        self.sp_outline_w.setRange(1, 8)
-        self.sp_outline_w.setValue(2)
-        self.sp_outline_w.setSuffix(" px")
-        self.sp_outline_w.setFixedWidth(70)
-        self.sp_outline_w.setToolTip("产品轮廓线的粗细（像素）")
-        self.sp_outline_w.valueChanged.connect(lambda _v: self.overlayChanged.emit())
-        bar.addWidget(self.sp_outline_w)
-
-        self.cb_show_drawarea = QCheckBox("显示限定范围")
-        self.cb_show_drawarea.setChecked(True)
-        self.cb_show_drawarea.setToolTip("用黄色虚线标出手绘限定范围，缺陷只能落在这个范围内")
-        self.cb_show_drawarea.toggled.connect(lambda _v: self.overlayChanged.emit())
-        bar.addWidget(self.cb_show_drawarea)
-
-        bar.addStretch(1)
-        return bar
-
-    def _pick_outline_color(self):
-        # ⚠️ QColorDialog 在 QtWidgets 里（不在 QtGui）。
-        #    之前误写成 `from PyQt6.QtGui import QColorDialog`，点击按钮时抛
-        #    ImportError —— 在 PyInstaller 打包的 exe 里该异常从 Qt 槽函数抛出
-        #    会直接导致进程 abort，表现为「点一下轮廓色就闪退」。
-        c = QColorDialog.getColor(
-            QColor(*self._outline_color), self, "选择产品轮廓颜色")
-        if c.isValid():
-            self._outline_color = (c.red(), c.green(), c.blue())
-            self.btn_outline_color.setStyleSheet(
-                f"background:rgb({c.red()},{c.green()},{c.blue()});")
-            self.overlayChanged.emit()
-
-    def pos_mode(self) -> str:
-        """当前缺陷位置方式（POS_MODE_PRODUCT / POS_MODE_PIXEL）。"""
-        return self.cmb_posmode.currentData()
-
-    def outline_color(self):
-        return self._outline_color
-
-    def outline_width(self) -> int:
-        return int(self.sp_outline_w.value())
-
-    def show_product_outline(self) -> bool:
-        return self.cb_show_outline.isChecked()
-
-    def show_draw_area(self) -> bool:
-        return self.cb_show_drawarea.isChecked()
-
-    def _bar_draw(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
-        bar.setSpacing(6)
         t = QLabel("效果预览")
         t.setProperty("role", "title")
         bar.addWidget(t)
@@ -249,6 +179,35 @@ class PreviewPane(QWidget):
         bar.addWidget(b_fin)
         return bar
 
+    def _pick_outline_color(self):
+        # ⚠️ QColorDialog 在 QtWidgets 里（不在 QtGui）。
+        #    之前误写成 `from PyQt6.QtGui import QColorDialog`，点击按钮时抛
+        #    ImportError —— 在 PyInstaller 打包的 exe 里该异常从 Qt 槽函数抛出
+        #    会直接导致进程 abort，表现为「点一下轮廓色就闪退」。
+        c = QColorDialog.getColor(
+            QColor(*self._outline_color), self, "选择产品轮廓颜色")
+        if c.isValid():
+            self._outline_color = (c.red(), c.green(), c.blue())
+            self.btn_outline_color.setStyleSheet(
+                f"background:rgb({c.red()},{c.green()},{c.blue()});")
+            self.overlayChanged.emit()
+
+    def pos_mode(self) -> str:
+        """当前缺陷位置方式（POS_MODE_PRODUCT / POS_MODE_PIXEL）。"""
+        return self.cmb_posmode.currentData()
+
+    def outline_color(self):
+        return self._outline_color
+
+    def outline_width(self) -> int:
+        return int(self.sp_outline_w.value())
+
+    def show_product_outline(self) -> bool:
+        return self.cb_show_outline.isChecked()
+
+    def show_draw_area(self) -> bool:
+        return self.cb_show_drawarea.isChecked()
+
     def _add_angle_widgets(self, bar: QHBoxLayout):
         """把「ROI角度 + ±90°」加入指定行（只在矩形模式显示）。"""
         self.lbl_angle = QLabel("ROI角度")
@@ -277,9 +236,44 @@ class PreviewPane(QWidget):
         self._rot_r = b_rot_r
 
     def _bar_zoom(self) -> QHBoxLayout:
-        """缩放工具行 + 缺陷位置像素级微调按钮。"""
+        """轮廓/限定范围显示 + 缩放工具行 + 缺陷位置像素级微调按钮。"""
         bar = QHBoxLayout()
         bar.setSpacing(6)
+
+        # ---- 轮廓 / 限定范围显示（本行行首，「缺陷位置」微调的左侧） ----
+        self.cb_show_outline = QCheckBox("显示产品轮廓")
+        self.cb_show_outline.setChecked(True)
+        self.cb_show_outline.setToolTip("在预览图上用明显的线条描出识别到的产品轮廓")
+        self.cb_show_outline.toggled.connect(lambda _v: self.overlayChanged.emit())
+        bar.addWidget(self.cb_show_outline)
+
+        self.lbl_outline_color = QLabel("轮廓色")
+        bar.addWidget(self.lbl_outline_color)
+        self.btn_outline_color = QPushButton("■")
+        self.btn_outline_color.setFixedSize(46, 24)
+        self.btn_outline_color.setToolTip("点击选择产品轮廓线的颜色")
+        self._outline_color = (255, 80, 80)
+        self.btn_outline_color.clicked.connect(self._pick_outline_color)
+        bar.addWidget(self.btn_outline_color)
+
+        self.lbl_outline_w = QLabel("线宽")
+        bar.addWidget(self.lbl_outline_w)
+        self.sp_outline_w = QSpinBox()
+        self.sp_outline_w.setRange(1, 8)
+        self.sp_outline_w.setValue(2)
+        self.sp_outline_w.setSuffix(" px")
+        self.sp_outline_w.setFixedWidth(70)
+        self.sp_outline_w.setToolTip("产品轮廓线的粗细（像素）")
+        self.sp_outline_w.valueChanged.connect(lambda _v: self.overlayChanged.emit())
+        bar.addWidget(self.sp_outline_w)
+
+        self.cb_show_drawarea = QCheckBox("显示限定范围")
+        self.cb_show_drawarea.setChecked(True)
+        self.cb_show_drawarea.setToolTip("用黄色虚线标出手绘限定范围，缺陷只能落在这个范围内")
+        self.cb_show_drawarea.toggled.connect(lambda _v: self.overlayChanged.emit())
+        bar.addWidget(self.cb_show_drawarea)
+
+        bar.addSpacing(12)
 
         b_out = QPushButton("－")
         b_out.setFixedWidth(40)
@@ -302,12 +296,13 @@ class PreviewPane(QWidget):
         b_in.clicked.connect(lambda: self.zoom_all(1.25))
         bar.addWidget(b_in)
 
-        # ---- 缺陷位置微调（像素级，单击一次移动 1px，按住不放持续移动） ----
+        # ---- 缺陷位置微调（像素级，单击一次移动 1px） ----
+        # 注意：不要开 setAutoRepeat —— 按住连移会频繁整图重合成，实测卡顿
         bar.addSpacing(10)
         t_mv = QLabel("缺陷位置")
         t_mv.setProperty("role", "title")
         t_mv.setToolTip("把最近一次生成的缺陷整体平移（单位：像素 px）。\n"
-                        "单击一次移动 1px；按住不松则连续移动，松开停止。\n"
+                        "单击一次移动 1px。\n"
                         "偏移会同步应用到「保存缺陷图」。")
         bar.addWidget(t_mv)
         self.btn_move = {}
@@ -316,10 +311,7 @@ class PreviewPane(QWidget):
         for label, cn, dx, dy in _dirs:
             b = QPushButton(label)
             b.setFixedWidth(40)
-            b.setToolTip(f"缺陷位置{cn}移（每次 1px；按住不放持续移动，松开停止）")
-            b.setAutoRepeat(True)
-            b.setAutoRepeatDelay(350)      # 按住 350ms 后开始连续移动
-            b.setAutoRepeatInterval(30)    # 连续移动间隔 30ms（约 33px/秒）
+            b.setToolTip(f"缺陷位置{cn}移（每次 1px）")
             b.clicked.connect(lambda _=False, d=dx, e=dy: self.defectMove.emit(d, e))
             self.btn_move[(dx, dy)] = b
             bar.addWidget(b)

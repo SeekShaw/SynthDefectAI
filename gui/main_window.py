@@ -858,13 +858,17 @@ class MainWindow(QMainWindow):
         # Tab 标签左侧（页外），一眼可见当前启用了哪一个
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
+        # 8 个 Tab 全部放下，不显示右侧 «/» 滚动箭头：
+        # 文字不带空格 + 关闭滚动按钮（放不下时 Qt 会自动压缩各 Tab 宽度）
+        self.tabs.setUsesScrollButtons(False)
+        self.tabs.tabBar().setStyleSheet("QTabBar::tab { padding: 2px 4px; }")
         self.tabs.currentChanged.connect(self._sync_defect_header)
         self.pages: dict[str, DefectPage] = {}
         for i, kind in enumerate(DEFECT_KINDS):
             page = DefectPage(kind, DEFAULT_SETTINGS[kind])
             page.changed.connect(self.schedule_preview)
             self.pages[kind] = page
-            self.tabs.addTab(page, f"  {KIND_CN[kind]}  ")
+            self.tabs.addTab(page, KIND_CN[kind])
             self.tabs.tabBar().setTabButton(
                 i, QTabBar.ButtonPosition.LeftSide, page.enable)
             page.enable.toggled.connect(
