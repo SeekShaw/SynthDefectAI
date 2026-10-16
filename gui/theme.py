@@ -100,6 +100,42 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 
+/* ---- 数字框上下箭头：深色主题下必须显式定义，否则箭头不可见 ---- */
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    background: #2b323c;
+    border: none;
+    width: 17px;
+}}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+    background: {ACCENT_DIM};
+}}
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+    background: {ACCENT};
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid {TEXT_DIM};
+}}
+QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover,
+QSpinBox::up-arrow:pressed, QDoubleSpinBox::up-arrow:pressed {{
+    border-bottom-color: #ffffff;
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid {TEXT_DIM};
+}}
+QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover,
+QSpinBox::down-arrow:pressed, QDoubleSpinBox::down-arrow:pressed {{
+    border-top-color: #ffffff;
+}}
+
 QCheckBox, QRadioButton {{ background: transparent; spacing: 6px; }}
 QCheckBox::indicator, QRadioButton::indicator {{
     width: 14px; height: 14px;
