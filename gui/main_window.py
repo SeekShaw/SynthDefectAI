@@ -802,7 +802,8 @@ class MainWindow(QMainWindow):
         self.btn_preview.setMinimumHeight(36)
         self.btn_preview.setMinimumWidth(140)
         self.btn_preview.setToolTip("按当前参数生成一次缺陷预览")
-        self.btn_preview.clicked.connect(self.refresh_preview)
+        self.btn_preview.clicked.connect(
+            lambda: self.refresh_preview(reset_offset=True))
         bl.addWidget(self.btn_preview)
         self.btn_save = QPushButton("保存缺陷图")
         self.btn_save.setProperty("accent", True)
@@ -1272,6 +1273,9 @@ class MainWindow(QMainWindow):
         else:
             self.current_image = None
             self.current_path = ""
+        # 切换图片：缺陷位置微调的偏移只针对上一张图，必须清零
+        self._defect_offset = (0, 0)
+        self._defect_shift_base = None
         self.preview.clear_regions()
         self.schedule_preview()
 
@@ -1733,11 +1737,20 @@ class MainWindow(QMainWindow):
             f"缺陷位置偏移 x={ox:+d}px y={oy:+d}px（相对生成位置，"
             f"「保存缺陷图」同样生效；重新生成预览后归零）")
 
-    def refresh_preview(self):
+    def refresh_preview(self, reset_offset: bool = False):
+        """重新生成缺陷预览。
+
+        reset_offset=True 表示用户**主动点「缺陷生成预览」**：此时把「缺陷位置微调」
+        的累计偏移清零（文档约定「重新生成预览后归零」）。
+        reset_offset=False（防抖定时器 / 参数微调触发的自动重生成）则**保留**偏移，
+        并把当前累计偏移同步应用到本次预览，避免刚微调好的位置被自动重生成冲掉。
+        """
         if self.current_image is None:
             self.preview.set_images(None, None, None)
             self.preview.set_info("—")
             return
+        if reset_offset:
+            self._defect_offset = (0, 0)
         # 用户可能画完线还没双击/回车结束就先点了刷新 —— 这里帮他提交
         self.preview.commit_pending()
         # 产品轮廓 / 限定范围叠加层：「按图像坐标位置」不执行产品轮廓检测
@@ -1819,8 +1832,10 @@ class MainWindow(QMainWindow):
                 mid = mid * (1 - a) + np.array(color, np.float32)[None, None, :] * a
             mid = np.clip(mid, 0, 255).astype(np.uint8)
 
-            # 缓存缺陷层供「缺陷位置微调」使用；重新生成后偏移归零
-            self._defect_offset = (0, 0)
+            # 缓存**未偏移**的缺陷基准（供「缺陷位置微调」从零重新合成）；
+            # 偏移量在此保留（不归零），并在本次预览同步应用，
+            # 这样防抖自动重生成不会把刚微调好的位置冲掉。
+            ox, oy = self._defect_offset
             if applied:
                 mask_all = clip01(sum(clip01(r.mask) for r in applied))
                 self._defect_shift_base = (self.current_image, img, mid,
@@ -1829,6 +1844,15 @@ class MainWindow(QMainWindow):
                 self._defect_shift_base = None
 
             if applied:
+                # 把累计微调偏移同步到本次预览显示与统计信息
+                if ox or oy:
+                    img = np.clip(_shift_arr(img.astype(np.float32), ox, oy),
+                                  0, 255).astype(np.uint8)
+                    mid = np.clip(_shift_arr(mid.astype(np.float32), ox, oy),
+                                  0, 255).astype(np.uint8)
+                    for r in applied:
+                        r.mask = _shift_arr(r.mask, ox, oy)
+                    mask_all = clip01(sum(clip01(r.mask) for r in applied))
                 kinds = " + ".join(
                     f"{KIND_CN.get(r.kind, r.kind)}"
                     f"[{TARGET_CN.get(getattr(r, 'surface', 'both'), '?')}"

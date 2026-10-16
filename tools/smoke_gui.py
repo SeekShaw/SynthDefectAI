@@ -1159,11 +1159,18 @@ def main() -> int:
     # 位置微调按钮不带自动重复（按住连移会卡，已按需求关闭：单击一次移动 1px）
     for _b in ("←", "→", "↑", "↓"):
         check(not btns[_b].autoRepeat(), f"「{_b}」已关闭按住连移（无 autoRepeat）")
-    # 重新生成预览后偏移应归零
+    # 防抖自动重生成（reset_offset=False）应**保留**微调偏移，
+    # 不会把刚微调好的位置冲掉（这正是「移动后保存是移位前」bug 的根因）
     win._preview_timer.stop()
     win.refresh_preview()
     app.processEvents()
-    check(win._defect_offset == (0, 0), "重新生成预览后偏移归零")
+    check(win._defect_offset == (-1, 2),
+          f"自动重生成后偏移保留（{win._defect_offset}）")
+    # 用户主动点「缺陷生成预览」(reset_offset=True) 才清零（文档约定「重新生成预览后归零」）
+    win.btn_preview.click()
+    app.processEvents()
+    check(win._defect_offset == (0, 0),
+          "点「缺陷生成预览」后偏移归零（手动重生成）")
 
     off0 = QPointF(v._offset)
     v._panning = True
@@ -1313,6 +1320,52 @@ def main() -> int:
               f"文件名以原图名开头（{os.path.basename(pngs[0])}）")
         check("seed" in os.path.basename(pngs[0]),
               "文件名带 seed 便于区分多次保存")
+
+    # ================= 回归：移动缺陷后再被防抖重生成，保存仍需反映位移 =================
+    # 复现并锁定「生成的缺陷移动位置后，保存的图片是移位之前」的 bug：
+    # 微调后若恰好触发防抖定时器(参数微调/区域重算)调用 refresh_preview，
+    # 旧逻辑会把偏移清零，导致保存回到移位前。修复后偏移应保留并同步到保存结果。
+    win._preview_timer.stop()
+    win.btn_preview.click()          # 主动重生成并归零偏移
+    app.processEvents()
+    check(win._defect_offset == (0, 0), "回归基线：手动重生成后偏移归零")
+    btns["↓"].click()
+    btns["↓"].click()
+    btns["↓"].click()
+    btns["↓"].click()
+    app.processEvents()
+    check(win._defect_offset == (0, 4),
+          f"回归：点 4 次↓ 偏移累计到 (0,4)（{win._defect_offset}）")
+    _base_img = win._defect_shift_base[1] if win._defect_shift_base else None
+    win.schedule_preview()           # 模拟用户微调参数 -> 防抖定时器
+    QTest.qWait(350)                 # 等定时器触发 refresh_preview
+    app.processEvents()
+    check(win._defect_offset == (0, 4),
+          f"回归：防抖重生成后偏移仍保留（{win._defect_offset}）")
+    out_race = os.path.join(HERE, "build", "out_repro_race")
+    if os.path.isdir(out_race):
+        for f in glob.glob(os.path.join(out_race, "*.png")):
+            os.remove(f)
+    win.ed_out.setText(out_race)
+    _oi2 = _QMB.information
+    _QMB.information = staticmethod(lambda *a, **k: _QMB.StandardButton.Ok)
+    try:
+        win.btn_save.click()
+        app.processEvents()
+    finally:
+        _QMB.information = _oi2
+    rp = sorted(glob.glob(os.path.join(out_race, "*.png")))
+    if rp and _base_img is not None:
+        from core.utils import imread as _imread2
+        _sv = _imread2(rp[0])
+        ox, oy = win._defect_offset
+        _exp = np.clip(_shift_arr(_base_img.astype(np.float32), ox, oy),
+                       0, 255).astype(np.uint8)
+        _md = float(np.abs(_sv.astype(np.float32) - _exp.astype(np.float32)).max())
+        check(_md < 1.0,
+              f"回归：保存图=移动后预览（最大差 {_md:.2f}，偏移 {win._defect_offset}）")
+    else:
+        check(False, "回归：移动后保存应产生文件")
 
     win.close()
     if FAIL:
