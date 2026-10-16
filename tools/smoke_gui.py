@@ -152,7 +152,35 @@ def main() -> int:
     check(bool(_capt) and "只允许开启1个" in str(_capt[-1])
           and "划痕" in str(_capt[-1]),
           f"弹窗文案含规则与已启用类型：{_capt[-1] if _capt else '（无弹窗）'}")
+
+    # ---- 高级参数「同时生成缺陷种类」（默认 1，>1 时允许多类型并存） ----
+    check(win.sp_kind_limit.value() == 1
+          and win.sp_kind_limit.minimum() == 1,
+          "高级参数「同时生成缺陷种类」默认值为 1")
+    _cw = win.tabs.cornerWidget()
+    check(_cw is not None and win.sp_kind_limit in _cw.findChildren(QSpinBox),
+          "「同时生成缺陷种类」位于缺陷配置卡 Tab 栏右上角（高级参数）")
+    win.sp_kind_limit.setValue(2)
+    win.pages["smudge"].enable.setChecked(True)      # 上限 2 → 允许第 2 个
+    app.processEvents()
+    check(win.pages["smudge"].enable.isChecked()
+          and win.pages["scratch"].enable.isChecked(),
+          "上限改为 2 后可同时启用 划痕 + 脏污")
+    _m2 = win.preview.cmb_mode.model()
+    check(_m2.item(1).isEnabled() and _m2.item(2).isEnabled()
+          and _m2.item(3).isEnabled(),
+          "划痕+其它类型同时启用 → 线条/矩形/画笔均可用（并集）")
+    win.pages["discolor"].enable.setChecked(True)    # 第 3 个 → 拒绝
+    app.processEvents()
+    check(not win.pages["discolor"].enable.isChecked(),
+          "上限 2 时再开第 3 个类型 → 自动回退")
+    check(bool(_capt) and "只允许开启2个" in str(_capt[-1]),
+          f"弹窗数值随上限联动（只允许开启2个）：{_capt[-1] if _capt else '（无弹窗）'}")
     _QMB0.information = staticmethod(lambda *a, **k: _QMB0.StandardButton.Ok)
+    win.sp_kind_limit.setValue(1)
+    win.pages["smudge"].enable.setChecked(False)
+    app.processEvents()
+
     _m0 = win.preview.cmb_mode.model()
     check(not _m0.item(2).isEnabled() and not _m0.item(3).isEnabled(),
           "启用划痕时「画矩形区域 / 画笔涂抹」不可选（只能画线条）")
@@ -162,6 +190,21 @@ def main() -> int:
           and _m0.item(3).isEnabled(),
           "全部关闭后线条 / 矩形 / 画笔均可用")
     win.pages["scratch"].enable.setChecked(True)     # 恢复默认：仅划痕启用
+
+    # ---- 需求：增强缩略图与放大图改为上下排版（同一列，高度与预览三栏一致） ----
+    check(win.split_main.count() == 2,
+          f"主分割为两列：预览 | 右列（实际 {win.split_main.count()} 列）")
+    from PyQt6.QtCore import Qt as _Qt
+    check(win.split_aug.orientation() == _Qt.Orientation.Vertical
+          and win.split_aug.count() == 2,
+          "右列为垂直分割：上=缩略图画廊 下=缺陷图放大")
+    _gy = win.gallery.mapTo(win, win.gallery.rect().topLeft()).y()
+    _dy = win.defect_view.mapTo(win, win.defect_view.rect().topLeft()).y()
+    check(_gy < _dy, f"缩略图在放大图上方（{_gy} < {_dy}）")
+    _ph = win.preview.height()
+    _rh = win.split_main.widget(1).height()
+    check(abs(_ph - _rh) <= 2,
+          f"右列总高与预览三栏一致（{_rh} vs {_ph}）")
 
     # ================= 需求：输出设置只有「缺陷图」默认开启 =================
     outs = [("缺陷图", win.cb_defect, True), ("缺陷掩膜", win.cb_mask, False),

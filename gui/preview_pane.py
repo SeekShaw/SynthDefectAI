@@ -502,26 +502,28 @@ class PreviewPane(QWidget):
         return m.item(idx) if hasattr(m, "item") else None
 
     @staticmethod
-    def allowed_modes(scratch_on: bool, any_on: bool) -> set:
-        """按启用的缺陷类型计算可用绘制方式。
+    def allowed_modes(scratch_on: bool, other_on: bool) -> set:
+        """按启用的缺陷类型计算可用绘制方式（多类型同时启用取并集）。
 
-        · 划痕启用 → 只能画线条（其它方式不可选）
-        · 其它类型启用 → 只能画矩形 / 画笔
+        · 仅划痕启用 → 只能画线条（其它方式不可选）
+        · 仅其它类型启用 → 只能画矩形 / 画笔
+        · 划痕 + 其它类型同时启用（「同时生成缺陷种类」>1）→ 三种都可用
         · 没有启用任何类型 → 线条 / 矩形 / 画笔都可用
         """
         allowed = {ImageView.MODE_VIEW}
-        if not any_on:
+        if not scratch_on and not other_on:
             allowed |= {ImageView.MODE_LINE, ImageView.MODE_RECT,
                         ImageView.MODE_BRUSH}
-        elif scratch_on:
-            allowed |= {ImageView.MODE_LINE}
         else:
-            allowed |= {ImageView.MODE_RECT, ImageView.MODE_BRUSH}
+            if scratch_on:
+                allowed |= {ImageView.MODE_LINE}
+            if other_on:
+                allowed |= {ImageView.MODE_RECT, ImageView.MODE_BRUSH}
         return allowed
 
-    def set_mode_availability(self, scratch_on: bool, any_on: bool):
+    def set_mode_availability(self, scratch_on: bool, other_on: bool):
         """禁用不可用的绘制方式，并把当前模式切到最近的可用项。"""
-        allowed = self.allowed_modes(scratch_on, any_on)
+        allowed = self.allowed_modes(scratch_on, other_on)
         for i in range(self.cmb_mode.count()):
             it = self._mode_item(i)
             if it is not None:

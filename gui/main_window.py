@@ -185,7 +185,8 @@ class DefectPage(QWidget):
         self.enable = QCheckBox()
         self.enable.setToolTip(
             f"启用/停用「{KIND_CN.get(kind, kind)}」缺陷\n"
-            "（同时只能启用一个缺陷类型，生成速度考虑）")
+            "（默认同时只能启用一个缺陷类型；可用 Tab 栏右上角的\n"
+            "高级参数「同时生成缺陷种类」调大上限，生成速度考虑）")
         self.enable.setChecked(bool(cfg.get("enable", False)))
         self.enable.toggled.connect(self._emit)
 
@@ -460,7 +461,7 @@ class ThumbnailGallery(QWidget):
     def _placeholder(self):
         self.clear()
         tip = QLabel("勾选「缺陷样本增强模式」并点「缺陷生成预览」后，\n"
-                     "这里显示生成的缩略图；点击缩略图可在右侧查看大图。")
+                     "这里显示生成的缩略图；点击缩略图可在下方查看大图。")
         tip.setWordWrap(True)
         tip.setProperty("role", "hint")
         tip.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -577,7 +578,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self._card_out, 4)
         root.addLayout(top)
 
-        # 下半部分：左=源图/手绘（框选部分移到最左），中=增强缩略图画廊，右=缺陷图显示
+        # 下半部分：左=源图/手绘（框选部分移到最左），右=增强缩略图（上）+缺陷图放大（下）
         self.split_main = QSplitter(Qt.Orientation.Horizontal)
         self.split_main.setContentsMargins(0, 0, 0, 0)
         self.split_main.setHandleWidth(6)
@@ -597,29 +598,41 @@ class MainWindow(QMainWindow):
         self._mutual_lock = False
         self.split_main.addWidget(self.preview)
 
-        # 中间：增强样本缩略图画廊（框选区域空出后放这里）
+        # 右列：增强样本缩略图（上） + 缩略图放大图（下）**上下排版**，
+        # 整列高度与左侧「原图 / 区域图 / 缺陷图」三栏一致
         self.gallery = ThumbnailGallery()
         self.gallery.selected.connect(self._on_thumb_selected)
-        self.split_main.addWidget(self.gallery)
 
-        # 右侧：缺陷图显示（点击左侧缩略图即在此查看大图）
         self.defect_view = ImageView()
         self.defect_view.setStyleSheet(
             "background:#0e1013; border:1px solid #2e353f; border-radius:8px;")
+        low = QWidget()
+        lv = QVBoxLayout(low)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(4)
+        lv.addWidget(self.defect_view, 1)
+        rcap = QLabel("缺陷图（点击上方缩略图查看）")
+        rcap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        rcap.setProperty("role", "hint")
+        lv.addWidget(rcap)
+
+        self.split_aug = QSplitter(Qt.Orientation.Vertical)
+        self.split_aug.setContentsMargins(0, 0, 0, 0)
+        self.split_aug.setHandleWidth(6)
+        self.split_aug.addWidget(self.gallery)
+        self.split_aug.addWidget(low)
+        # 放大图占大头（约 2/3 高度），与其它三栏的显示高度观感一致
+        self.split_aug.setStretchFactor(0, 3)
+        self.split_aug.setStretchFactor(1, 5)
+
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(4)
-        rcap = QLabel("缺陷图（点击左侧缩略图查看）")
-        rcap.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        rcap.setProperty("role", "hint")
-        rv.addWidget(self.defect_view, 1)
-        rv.addWidget(rcap)
+        rv.addWidget(self.split_aug)
         self.split_main.addWidget(right)
 
         self.split_main.setStretchFactor(0, 5)
-        self.split_main.setStretchFactor(1, 3)
-        self.split_main.setStretchFactor(2, 5)
+        self.split_main.setStretchFactor(1, 4)
         root.addWidget(self.split_main, 1)
 
         # 三张卡片的等高在 showEvent 中按真实布局高度统一（保证文字不裁切）
@@ -748,7 +761,7 @@ class MainWindow(QMainWindow):
         self.cb_augment.setToolTip(
             "在左侧预览上手绘「大致区域」后勾选本项：\n"
             "将按「生成图片数量」生成多张缺陷图（每张缺陷数由算法参数的「个数」决定），\n"
-            "缺陷类型/位置/形状随机；生成后在中间画廊点击缩略图可在右侧查看大图。\n"
+            "缺陷类型/位置/形状随机；生成后在右列上方画廊点击缩略图可在下方查看大图。\n"
             "未绘制区域时退化为整图随机生成。")
         self.cb_augment.toggled.connect(self._on_augment_toggled)
         ra = QHBoxLayout()
@@ -874,6 +887,25 @@ class MainWindow(QMainWindow):
             page.enable.toggled.connect(
                 lambda on, k=kind: self._on_defect_enable(k, on))
         self._sync_tab_titles()
+
+        # 高级参数：同时生成缺陷种类（放在 Tab 栏右上角，不占额外行高）
+        cw = QWidget()
+        chw = QHBoxLayout(cw)
+        chw.setContentsMargins(0, 0, 8, 0)
+        chw.setSpacing(4)
+        lbl_lim = QLabel("同时生成缺陷种类")
+        lbl_lim.setProperty("role", "hint")
+        chw.addWidget(lbl_lim)
+        self.sp_kind_limit = QSpinBox()
+        self.sp_kind_limit.setRange(1, len(DEFECT_KINDS))
+        self.sp_kind_limit.setValue(1)
+        self.sp_kind_limit.setToolTip(
+            "高级参数：允许同时启用的缺陷类型个数（默认 1）。\n"
+            "例如设为 2 时可同时勾选两个缺陷类型一起生成；\n"
+            "超过该数量再启用会弹窗提示。")
+        chw.addWidget(self.sp_kind_limit)
+        self.tabs.setCornerWidget(cw, Qt.Corner.TopRightCorner)
+        cw.setVisible(True)
         vp.addWidget(self.tabs, 1)
         return gb
 
@@ -883,34 +915,38 @@ class MainWindow(QMainWindow):
         return kinds[i] if i < len(kinds) else kinds[0]
 
     def _on_defect_enable(self, kind: str, on: bool):
-        """启用开关互斥：出于生成速度考虑，同时只允许开启一个缺陷类型。"""
+        """启用数量上限：默认同时只允许 1 个（高级参数「同时生成缺陷种类」可调）。"""
         if on and not getattr(self, "_mutual_lock", False):
-            other = next((k for k in DEFECT_KINDS
-                          if k != kind and self.pages[k].enable.isChecked()),
-                         None)
-            if other is not None:
-                # 先回退本次勾选，再弹窗说明
+            limit = int(self.sp_kind_limit.value())
+            others = [k for k in DEFECT_KINDS
+                      if k != kind and self.pages[k].enable.isChecked()]
+            if len(others) >= limit:
+                # 先回退本次勾选，再弹窗说明（弹窗中的数值随上限联动）
                 self._mutual_lock = True
                 self.pages[kind].enable.setChecked(False)
                 self._mutual_lock = False
+                names = "、".join(f"「{KIND_CN.get(k, k)}」" for k in others[:limit])
+                more = "等" if len(others) > limit else ""
                 QMessageBox.information(
                     self, "提示",
-                    f"考虑到缺陷的生成速度，只允许开启1个，"
-                    f"目前已开启「{KIND_CN.get(other, other)}」，"
-                    f"请关闭后再开启本缺陷类型")
+                    f"考虑到缺陷的生成速度，只允许开启{limit}个，"
+                    f"目前已开启{names}{more}，请关闭后再开启本缺陷类型")
                 return
         self._update_mode_availability()
         self._sync_tab_titles()
 
+    def _enabled_kinds(self) -> list:
+        return [k for k in DEFECT_KINDS if self.pages[k].enable.isChecked()]
+
     def _update_mode_availability(self):
-        """按启用的缺陷类型联动绘制方式：
-        划痕 → 只能画线条；其它类型 → 只能画矩形 / 画笔。"""
+        """按启用的缺陷类型联动绘制方式（多类型取可用方式并集）：
+        划痕 → 画线条；其它类型 → 矩形/画笔；两者同时启用 → 三种都可。"""
         pv = getattr(self, "preview", None)
         if pv is None:
             return
         scratch_on = self.pages["scratch"].enable.isChecked()
-        any_on = any(p.enable.isChecked() for p in self.pages.values())
-        pv.set_mode_availability(scratch_on=scratch_on, any_on=any_on)
+        other_on = any(k != "scratch" for k in self._enabled_kinds())
+        pv.set_mode_availability(scratch_on=scratch_on, other_on=other_on)
 
     def _sync_defect_header(self, *_):
         """Tab 上的复选框即启用状态指示，这里只需刷新提示（状态栏）。"""
@@ -1810,19 +1846,17 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "载入失败", "无法读取该参数文件。")
 
     def _apply_preset(self, data: dict):
-        # 预设可能含多个启用类型，但互斥规则要求只能开一个：
-        # 加锁批量应用，只保留第一个启用的类型
+        # 预设可能含多个启用类型：加锁批量应用，最多保留前 limit 个启用的类型
         self._mutual_lock = True
         try:
-            first_on = None
+            want_on_kinds = []
             for kind, cfg in (data.get("settings") or {}).items():
                 page = self.pages.get(kind)
                 if not page:
                     continue
-                want_on = bool(cfg.get("enable", True))
-                if want_on and first_on is None:
-                    first_on = kind
-                page.enable.setChecked(False)     # 先全部关掉，稍后只开第一个
+                if bool(cfg.get("enable", True)):
+                    want_on_kinds.append(kind)
+                page.enable.setChecked(False)     # 先全部关掉，稍后按上限开启
                 for k, v in cfg.items():
                     if k in page.rows:
                         page.rows[k].setValue(v)
@@ -1837,8 +1871,9 @@ class MainWindow(QMainWindow):
                         page._apply_color_swatch()
                     except Exception:
                         pass
-            if first_on is not None:
-                self.pages[first_on].enable.setChecked(True)
+            limit = int(self.sp_kind_limit.value())
+            for kind in want_on_kinds[:max(1, limit)]:
+                self.pages[kind].enable.setChecked(True)
         finally:
             self._mutual_lock = False
         self._update_mode_availability()
@@ -1902,8 +1937,9 @@ HELP_TEXT = """\
    **启用其它类型 → 只能画矩形 / 画笔**。
    没画完的线条，点「缺陷生成预览」或切换绘制模式时会自动提交。
 3. 「2 · 缺陷图生成配置」卡片顶部是缺陷名 Tab 分页，**启用开关就是每个
-   Tab 标签上的复选框**（同时只能启用一个缺陷类型；若再开另一个会弹窗提示，
-   需先关闭当前已启用的类型）。
+   Tab 标签上的复选框**（默认同时只能启用一个缺陷类型；再开另一个会弹窗提示，
+   需先关闭当前已启用的类型。高级参数「同时生成缺陷种类」在 Tab 栏右上角，
+   改为 N 时最多可同时启用 N 个类型，弹窗提示数值随之联动）。
    在各 Tab 内配置参数（明显度、强度、数量等），预览实时刷新。
    **划痕默认开启**，其它类型默认关闭。
    · 数量（条数 / 斑块数 / 区域数 / 缺角数）默认 1。画了 N 条线时，
