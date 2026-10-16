@@ -507,12 +507,13 @@ class PreviewPane(QWidget):
 
     @staticmethod
     def allowed_modes(scratch_on: bool, other_on: bool) -> set:
-        """按启用的缺陷类型计算可用绘制方式（多类型同时启用取并集）。
+        """按启用状态计算可用绘制方式（具体取哪个集合由调用方按当前 Tab 决定）。
 
-        · 仅划痕启用 → 只能画线条（其它方式不可选）
-        · 仅其它类型启用 → 只能画矩形 / 画笔
-        · 划痕 + 其它类型同时启用（「同时生成缺陷种类」>1）→ 三种都可用
-        · 没有启用任何类型 → 线条 / 矩形 / 画笔都可用
+        · scratch_on=True  → 只能画线条（划痕专用）
+        · other_on=True    → 只能画矩形 / 画笔
+        · 两者都不启用     → 线条 / 矩形 / 画笔都可用
+        多类型同启时不再取并集：划痕页/其它类型页各自约束，见
+        MainWindow._update_mode_availability。
         """
         allowed = {ImageView.MODE_VIEW}
         if not scratch_on and not other_on:

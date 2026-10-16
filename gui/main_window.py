@@ -1058,6 +1058,7 @@ class MainWindow(QMainWindow):
         self.tabs.setUsesScrollButtons(False)
         self.tabs.tabBar().setStyleSheet("QTabBar::tab { padding: 2px 4px; }")
         self.tabs.currentChanged.connect(self._sync_defect_header)
+        self.tabs.currentChanged.connect(lambda _i: self._update_mode_availability())
         self.pages: dict[str, DefectPage] = {}
         for i, kind in enumerate(DEFECT_KINDS):
             page = DefectPage(kind, DEFAULT_SETTINGS[kind])
@@ -1104,13 +1105,32 @@ class MainWindow(QMainWindow):
         return [k for k in DEFECT_KINDS if self.pages[k].enable.isChecked()]
 
     def _update_mode_availability(self):
-        """按启用的缺陷类型联动绘制方式（多类型取可用方式并集）：
-        划痕 → 画线条；其它类型 → 矩形/画笔；两者同时启用 → 三种都可。"""
+        """按「当前 Tab 的缺陷类型」联动绘制方式（划痕=线条，其它=矩形/画笔）。
+
+        多类型同时启用时不再取并集——否则划痕页也能画矩形，手绘矩形会
+        被当成其它类型的限定范围，语义混乱。规则：
+        · 当前 Tab 是划痕：划痕已启用 → 只能画线条；未启用且只有其它
+          类型启用 → 随其它类型（矩形/画笔）；无任何启用 → 三种都可选
+        · 当前 Tab 是其它类型：有任一非划痕类型启用 → 矩形/画笔；
+          仅划痕启用 → 线条（与单类型行为一致）；无启用 → 三种都可选
+        """
         pv = getattr(self, "preview", None)
         if pv is None:
             return
-        scratch_on = self.pages["scratch"].enable.isChecked()
-        other_on = any(k != "scratch" for k in self._enabled_kinds())
+        enabled = self._enabled_kinds() if getattr(self, "pages", None) else []
+        cur = (self.current_defect_kind()
+               if getattr(self, "tabs", None) is not None else None)
+        if cur == "scratch":
+            scratch_on = "scratch" in enabled
+            other_on = False
+        elif cur is not None:
+            others = [k for k in enabled if k != "scratch"]
+            other_on = bool(others)
+            scratch_on = ("scratch" in enabled) and not others
+        else:
+            # Tab 尚未构建（启动早期）：退回按启用类型判断
+            scratch_on = "scratch" in enabled
+            other_on = any(k != "scratch" for k in enabled)
         pv.set_mode_availability(scratch_on=scratch_on, other_on=other_on)
         self._sync_region_limits()
 

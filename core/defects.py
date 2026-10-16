@@ -1331,6 +1331,12 @@ def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
         lo, hi = SEVERITY_LEVELS.get(severity, (0.12, 1.0))
         sv = rng.uniform(lo, hi)
         region = resolve_target(target, region_masks)
+        if kind == "scratch" and scratch_paths:
+            # 手绘线条模式：划痕沿线的起止点生成，位置已由线条本身确定；
+            # 此时的手绘矩形/画笔区域是「其它缺陷类型」的限定范围，
+            # 不应再约束划痕（否则多类型同启时划痕会被别的类型的
+            # 限定区域挤掉，表现为「只剩最后启用的那个缺陷」）。
+            region = None
 
         gen = DEFECT_REGISTRY.get(kind)
         if gen is None:

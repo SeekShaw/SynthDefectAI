@@ -172,10 +172,25 @@ def main() -> int:
     check(win.pages["smudge"].enable.isChecked()
           and win.pages["scratch"].enable.isChecked(),
           "上限改为 2 后可同时启用 划痕 + 脏污")
+    # 第十三轮：绘制方式按当前 Tab 联动（不再并集）——划痕页只能画线条，
+    # 其它类型页只能画矩形/画笔；切页自动切到该类型的默认绘制方式
     _m2 = win.preview.cmb_mode.model()
-    check(_m2.item(1).isEnabled() and _m2.item(2).isEnabled()
+    check(_m2.item(1).isEnabled() and not _m2.item(2).isEnabled()
+          and not _m2.item(3).isEnabled(),
+          "划痕+其它类型同启：划痕页仅「画线条」可选（不再并集）")
+    check(win.preview.cmb_mode.currentData() == ImageView.MODE_LINE,
+          "划痕页当前绘制方式保持「画线条」")
+    win.tabs.setCurrentWidget(win.pages["smudge"])
+    app.processEvents()
+    check(not _m2.item(1).isEnabled() and _m2.item(2).isEnabled()
           and _m2.item(3).isEnabled(),
-          "划痕+其它类型同时启用 → 线条/矩形/画笔均可用（并集）")
+          "切到脏污页 → 仅「矩形/画笔」可选，线条被禁用")
+    check(win.preview.cmb_mode.currentData() == ImageView.MODE_RECT,
+          "切到脏污页自动切到「画矩形框」默认绘制方式")
+    win.tabs.setCurrentWidget(win.pages["scratch"])
+    app.processEvents()
+    check(win.preview.cmb_mode.currentData() == ImageView.MODE_LINE,
+          "切回划痕页自动切回「画线条」")
     win.pages["discolor"].enable.setChecked(True)    # 第 3 个 → 拒绝
     app.processEvents()
     check(not win.pages["discolor"].enable.isChecked(),
@@ -543,6 +558,52 @@ def main() -> int:
     check(not pv.has_drawn_regions(), "取消勾选后手绘区域已清空")
     check(v0.mode == ImageView.MODE_VIEW, "取消勾选后回到浏览模式")
 
+    # ================= 第十三轮：多类型同启，两类缺陷都要显示 =================
+    # 回归：划痕曾因「其它类型的限定矩形」约束 region 被整体丢弃，
+    # 表现为图像上只剩最后启用（后渲染）的那个缺陷。
+    if "from core.defects import apply_defects" or True:
+        from core.defects import apply_defects as _apply2
+        win.sp_kind_limit.setValue(8)
+        app.processEvents()
+        win.pages["scratch"].enable.setChecked(True)
+        app.processEvents()
+        pv.cb_draw.setChecked(True)
+        v0.clear_regions()
+        # 划痕页画一条线
+        win.tabs.setCurrentWidget(win.pages["scratch"])
+        app.processEvents()
+        v0.set_mode(ImageView.MODE_LINE)
+        v0._lines.append([(0.30 * w, 0.40 * h), (0.45 * w, 0.40 * h)])
+        v0._shape_order.append("line")
+        v0._cap_lines()
+        v0.regionChanged.emit()
+        # 黑点页画一个矩形
+        win.tabs.setCurrentWidget(win.pages["dot"])
+        app.processEvents()
+        v0.set_mode(ImageView.MODE_RECT)
+        v0._rects.append((0.65 * w, 0.60 * h, 0.18 * w, 0.16 * h, 0.0))
+        v0._shape_order.append("rect")
+        v0.regionChanged.emit()
+        app.processEvents()
+        check(win.pages["scratch"].enable.isChecked()
+              and win.pages["dot"].enable.isChecked(),
+              "多类型：划痕 + 黑点同时启用")
+        _st2 = win.current_settings()
+        _out2, _ap2 = _apply2(win.current_image, _st2, seed=5,
+                              region_masks=win._region_masks_for(None),
+                              region_hint=win._draw_hint(),
+                              scratch_paths=win.preview.line_paths())
+        _kinds2 = {r.kind: float((r.mask > 0.05).sum()) for r in _ap2}
+        check(_kinds2.get("scratch", 0) > 0 and _kinds2.get("dot", 0) > 0,
+              f"多类型同启两类都生成（scratch={_kinds2.get('scratch', 0):.0f}px, "
+              f"dot={_kinds2.get('dot', 0):.0f}px）——划痕不再被限定矩形挤掉")
+        pv.clear_regions()
+        pv.cb_draw.setChecked(False)
+        win.pages["dot"].enable.setChecked(False)
+        win.pages["smudge"].enable.setChecked(False)
+        win.sp_kind_limit.setValue(1)
+        app.processEvents()
+
     # ================= 需求 8：崩缺缺陷 =================
     check("chip" in win.pages, "崩缺页已注册")
     chip = win.pages["chip"]
@@ -659,10 +720,13 @@ def main() -> int:
           f"只取线条的掩膜独立可用（{float((m_line > 0.5).mean()) * 100:.1f}%）")
 
     # 勾选手绘 + 划痕默认开启 → 预览应沿线条生成
+    # （第十三轮：绘制方式按当前 Tab 联动，划痕页才默认「画线条」）
+    win.tabs.setCurrentWidget(win.pages["scratch"])
+    app.processEvents()
     pv.cb_draw.setChecked(True)
     app.processEvents()
     check(pv.cmb_mode.currentData() == ImageView.MODE_LINE,
-          "勾选手绘后默认进入「画线条」模式")
+          "勾选手绘后（划痕页）默认进入「画线条」模式")
     win._force_resegment()
     win.refresh_preview()
     app.processEvents()
