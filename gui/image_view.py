@@ -68,6 +68,12 @@ class ImageView(QWidget):
         self._max_lines = 0
         self._max_shapes = 0
         self._shape_order: List[str] = []   # 区域插入顺序（rect/stroke/poly）
+        # 区域归属：画该区域时所处缺陷页的类型（None=未归属，所有类型共用）。
+        # 多类型同启时每个缺陷类型只用自己的区域，互不挤占。
+        self._shape_kinds: List[Optional[str]] = []
+        # 由 MainWindow 注入：返回当前缺陷类型 / 某类型的区域数量上限
+        self.kind_provider = None       # Callable[[], Optional[str]]
+        self.shape_kind_cap = None      # Callable[[str], int]
         self._drag_origin: Optional[QPointF] = None
         self._rot_idx: Optional[int] = None
         self._rot_center: Optional[QPointF] = None
@@ -146,8 +152,18 @@ class ImageView(QWidget):
         self._strokes.clear()
         self._cur_pts.clear()
         self._shape_order.clear()
+        self._shape_kinds.clear()
         self.regionChanged.emit()
         self.update()
+
+    def _cur_owner(self) -> Optional[str]:
+        """当前正在绘制的区域归属的缺陷类型（无 provider / 异常时=None）。"""
+        if self.kind_provider is None:
+            return None
+        try:
+            return self.kind_provider()
+        except Exception:
+            return None
 
     # ---------------- 绘制数量上限 ----------------
     def set_max_lines(self, n: int):
@@ -168,6 +184,22 @@ class ImageView(QWidget):
                 self._lines.pop(0)          # 淘汰最早的线条
 
     def _cap_shapes(self):
+        # 归属模式：各缺陷类型的区域分别限量（画 B 的区域不影响 A 的区域）
+        if self.shape_kind_cap is not None:
+            counts: dict = {}
+            for i in range(len(self._shape_order) - 1, -1, -1):
+                k = (self._shape_kinds[i]
+                     if i < len(self._shape_kinds) else None)
+                if k is None:
+                    continue
+                try:
+                    cap = int(self.shape_kind_cap(k))
+                except Exception:
+                    cap = 0
+                counts[k] = counts.get(k, 0) + 1
+                if counts[k] > max(cap, 0):
+                    self._remove_shape_at(i)
+            return
         if self._max_shapes <= 0:
             return
         while (len(self._rects) + len(self._strokes) + len(self._polys)
@@ -175,6 +207,8 @@ class ImageView(QWidget):
             removed = False
             if self._shape_order:
                 tag = self._shape_order.pop(0)
+                if self._shape_kinds:
+                    self._shape_kinds.pop(0)
                 lst = {"rect": self._rects, "stroke": self._strokes,
                        "poly": self._polys}.get(tag)
                 if lst:
@@ -189,6 +223,21 @@ class ImageView(QWidget):
                     self._polys.pop(0)
                 else:
                     break
+
+    def _remove_shape_at(self, i: int):
+        """按下标删除一个区域（_shape_order / _shape_kinds / 图元列表同步）。"""
+        if i < 0 or i >= len(self._shape_order):
+            return
+        tag = self._shape_order.pop(i)
+        if i < len(self._shape_kinds):
+            self._shape_kinds.pop(i)
+        lst = {"rect": self._rects, "stroke": self._strokes,
+               "poly": self._polys}.get(tag)
+        if lst:
+            # 该 tag 在 _shape_order[:i] 中是第几次出现，就对应列表里的第几个
+            idx = sum(1 for t in self._shape_order[:i] if t == tag)
+            if idx < len(lst):
+                lst.pop(idx)
 
     def has_regions(self) -> bool:
         return bool(self._rects or self._lines or self._polys or self._strokes)
@@ -218,6 +267,7 @@ class ImageView(QWidget):
             self._last_kind = "poly"
             self._cur_pts = []
             self._shape_order.append("poly")
+            self._shape_kinds.append(self._cur_owner())
             self._cap_shapes()
             self.regionChanged.emit()
             self.update()
@@ -233,6 +283,22 @@ class ImageView(QWidget):
         self._cur_pts = []
         self.update()
         return False
+
+    def _shapes_of(self, tag: str, owner: Optional[str] = None) -> list:
+        """取出指定类型的图元；owner 非 None 时只取归属该类型的（未归属的一并给出）。"""
+        lst = {"rect": self._rects, "poly": self._polys,
+               "stroke": self._strokes}.get(tag, [])
+        if owner is None:
+            return list(lst)
+        out, idx = [], 0
+        for i, t in enumerate(self._shape_order):
+            if t != tag:
+                continue
+            own = self._shape_kinds[i] if i < len(self._shape_kinds) else None
+            if own is None or own == owner:
+                out.append(lst[idx])
+            idx += 1
+        return out
 
     # ---------------- 旋转 ROI 框 ----------------
     def _rect_corners(self, rect) -> List[QPointF]:
@@ -268,17 +334,19 @@ class ImageView(QWidget):
         i = index if 0 <= index < len(self._rects) else -1
         return self.set_rect_angle(self.rect_angle_deg(i) + float(deg), i)
 
-    def region_hint(self):
+    def region_hint(self, owner: Optional[str] = None):
         """返回手绘区域的主方向 (角度rad, 中心x, 中心y)，没有手绘返回 None。
 
         划痕会沿着这个方向生成：ROI 框用其旋转角与中心，画笔用最长笔迹的主轴。
         """
-        if self._rects:
-            cx, cy, rw, rh, ang = max(self._rects, key=lambda r: r[2] * r[3])
+        rects = self._shapes_of("rect", owner)
+        strokes = self._shapes_of("stroke", owner)
+        if rects:
+            cx, cy, rw, rh, ang = max(rects, key=lambda r: r[2] * r[3])
             return float(ang), float(cx), float(cy)
-        if self._strokes:
+        if strokes:
             best, blen = None, -1.0
-            for st in self._strokes:
+            for st in strokes:
                 pts = np.asarray(st, dtype=np.float64)
                 if len(pts) < 2:
                     continue
@@ -297,18 +365,21 @@ class ImageView(QWidget):
         return None
 
     def region_mask(self, shape: Tuple[int, int],
-                    include: Optional[Sequence[str]] = None) -> Optional[np.ndarray]:
+                    include: Optional[Sequence[str]] = None,
+                    owner: Optional[str] = None) -> Optional[np.ndarray]:
         """把手绘图元栅格化为与图像同尺寸的掩膜（float32 [0,1]）。
 
         include: 只栅格化指定类型的图元，可选 ``rect`` / ``poly`` / ``brush`` / ``line``。
                  缺省全部。脏污/异色/缺角只认矩形、多边形、画笔，
                  划痕只认线条 —— 由调用方按需筛选。
+        owner:   只取归属该缺陷类型的区域（多类型各画各的区域时使用）。
+                 未归属（None）的图元始终包含；owner=None 时取全部。
         """
         kinds = set(include) if include else {"rect", "poly", "brush", "line"}
-        rects = self._rects if "rect" in kinds else []
-        polys = self._polys if "poly" in kinds else []
+        rects = (self._shapes_of("rect", owner) if "rect" in kinds else [])
+        polys = (self._shapes_of("poly", owner) if "poly" in kinds else [])
         lines = self._lines if "line" in kinds else []
-        strokes = self._strokes if "brush" in kinds else []
+        strokes = (self._shapes_of("stroke", owner) if "brush" in kinds else [])
         if not (rects or polys or lines or strokes):
             return None
         h, w = shape
@@ -573,6 +644,7 @@ class ImageView(QWidget):
                                     rw, rh, 0.0))
                 self._last_kind = "rect"
                 self._shape_order.append("rect")
+                self._shape_kinds.append(self._cur_owner())
                 self._cap_shapes()
                 self.regionChanged.emit()
             self._drag_origin = None
@@ -581,6 +653,7 @@ class ImageView(QWidget):
                 self._strokes.append(self._cur_pts)
                 self._last_kind = "stroke"
                 self._shape_order.append("stroke")
+                self._shape_kinds.append(self._cur_owner())
                 self._cap_shapes()
                 self.regionChanged.emit()
             self._cur_pts = []

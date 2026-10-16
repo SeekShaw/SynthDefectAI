@@ -410,8 +410,9 @@ class PreviewPane(QWidget):
         self.views[0].clear_regions()
         self.regionChanged.emit()
 
-    def draw_region_mask(self, shape, include=None):
-        return self.views[0].region_mask(shape, include=include)
+    def draw_region_mask(self, shape, include=None, owner=None):
+        """owner：只取归属该缺陷类型的区域（None=全部）。"""
+        return self.views[0].region_mask(shape, include=include, owner=owner)
 
     def has_drawn_regions(self) -> bool:
         return self.views[0].has_regions()
@@ -424,9 +425,9 @@ class PreviewPane(QWidget):
         """手绘线条点列（划痕沿其生成）。"""
         return self.views[0].line_paths()
 
-    def region_hint(self):
-        """手绘区域方向提示 (角度rad, cx, cy)。"""
-        return self.views[0].region_hint()
+    def region_hint(self, owner=None):
+        """手绘区域方向提示 (角度rad, cx, cy)；owner 非 None 时按归属区域取。"""
+        return self.views[0].region_hint(owner)
 
     def rect_angle_deg(self) -> float:
         return float(self.sp_angle.value())

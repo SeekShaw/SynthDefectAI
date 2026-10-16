@@ -1293,7 +1293,8 @@ def resolve_target(target: str, region_masks: Optional[dict]) -> Optional[np.nda
 
 def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
                   region_masks: Optional[dict] = None, progress=None,
-                  region_hint=None, scratch_paths=None):
+                  region_hint=None, scratch_paths=None,
+                  region_masks_by_kind: Optional[dict] = None):
     """按 settings 依次叠加多类缺陷。
 
     settings 形如::
@@ -1314,6 +1315,11 @@ def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
                    非空时划痕**沿这些线**生成，起止位置与手绘一致；
                    为空时划痕按区域方向自由生成（批量流程）。
 
+    region_masks_by_kind: 可选，按缺陷类型各自的区域掩膜
+                          ``{kind: {"body":..., "electrode":...}}``。
+                          多类型同启、各类型用自己画的区域时提供；
+                          某类型缺省时回退到共用 region_masks。
+
     返回 (image, applied) —— applied 是 [DefectResult, ...]，按应用顺序。
     """
     rng = Rng(seed)
@@ -1330,7 +1336,8 @@ def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
         per_inst = cfg.pop("per_instance", None) or []
         lo, hi = SEVERITY_LEVELS.get(severity, (0.12, 1.0))
         sv = rng.uniform(lo, hi)
-        region = resolve_target(target, region_masks)
+        rm_k = (region_masks_by_kind or {}).get(kind)
+        region = resolve_target(target, rm_k if rm_k is not None else region_masks)
         if kind == "scratch" and scratch_paths:
             # 手绘线条模式：划痕沿线的起止点生成，位置已由线条本身确定；
             # 此时的手绘矩形/画笔区域是「其它缺陷类型」的限定范围，

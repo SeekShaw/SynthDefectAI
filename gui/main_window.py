@@ -737,6 +737,10 @@ class MainWindow(QMainWindow):
         self.preview.posModeChanged.connect(self._on_pos_mode_changed)
         self.preview.overlayChanged.connect(self._refresh_overlay)
         self.preview.defectMove.connect(self._shift_defect)
+        # 区域归属：区域画在哪个缺陷页就归哪个类型；各类型区域数量=其「生成数量」
+        for _v in self.preview.views:
+            _v.kind_provider = self.current_defect_kind
+            _v.shape_kind_cap = self._shape_cap_for
         # 缺陷位置微调：最近一次预览生成的「原图/缺陷图/叠加图/联合掩膜」+ 累计偏移
         self._defect_shift_base = None
         self._defect_offset = (0, 0)
@@ -1148,9 +1152,10 @@ class MainWindow(QMainWindow):
             line_cap = (int(self.pages["scratch"].config()["count"])
                         if "scratch" in enabled else 0)
             others = [k for k in enabled if k != "scratch"]
-            shape_cap = max(
-                (int(self.pages[k].config()[_COUNT_KEY.get(k, "count")])
-                 for k in others), default=0)
+            # 区域按类型归属限量（shape_kind_cap），这里的全局上限取各类型之和
+            shape_cap = sum(
+                int(self.pages[k].config()[_COUNT_KEY.get(k, "count")])
+                for k in others)
         except Exception:
             return
         for v in pv.views:
@@ -1314,14 +1319,33 @@ class MainWindow(QMainWindow):
     #: 脏污/异色/缺角 只认这几种手绘方式（不含线条）
     AREA_KINDS = ("rect", "poly", "brush")
 
-    def _draw_mask(self):
-        """脏污/异色/缺角 的限定区域：矩形 + 多边形 + 画笔（不含线条）。"""
+    def _shape_cap_for(self, kind: str) -> int:
+        """某缺陷类型可画的区域数量上限 = 其「生成数量」（供视图 FIFO 使用）。"""
+        p = getattr(self, "pages", {}).get(kind)
+        if p is None:
+            return 0
+        try:
+            return max(0, int(p.rows[p._count_key].value()))
+        except Exception:
+            return 0
+
+    def _draw_mask(self, kind=None):
+        """限定区域掩膜（矩形 + 多边形 + 画笔，不含线条）。
+
+        kind 非 None 时只取归属该类型的区域；该类型没有自己的区域时
+        回退为全部区域（与单类型/旧版本行为一致）。
+        """
         if self.current_image is None:
             return None
         if not (self.preview.draw_enabled() and self.preview.has_drawn_regions()):
             return None
-        return self.preview.draw_region_mask(self.current_image.shape[:2],
-                                             include=self.AREA_KINDS)
+        shape = self.current_image.shape[:2]
+        if kind is not None:
+            m = self.preview.draw_region_mask(shape, include=self.AREA_KINDS,
+                                              owner=kind)
+            if m is not None:
+                return m
+        return self.preview.draw_region_mask(shape, include=self.AREA_KINDS)
 
     def _draw_paths(self):
         """划痕用的手绘线条点列（起止点即划痕起止点）。"""
@@ -1367,8 +1391,10 @@ class MainWindow(QMainWindow):
             if mode == POS_MODE_PRODUCT else
             "缺陷位置：按图像坐标位置（忽略产品识别，手绘区域像素坐标直接生效）")
 
-    def _region_masks_for(self, seg) -> Optional[dict]:
+    def _region_masks_for(self, seg, kind=None) -> Optional[dict]:
         """按当前「缺陷位置方式」算出用于生成缺陷的区域掩膜。
+
+        kind 非 None 时使用该类型自己的手绘区域（多类型各画各的区域）。
 
         - ``POS_MODE_PRODUCT``：**产品表面 ∩ 手绘区域**。
           交集在这里显式相乘完成（而不是把手绘区域喂给 segment_mlcc），
@@ -1376,7 +1402,7 @@ class MainWindow(QMainWindow):
         - ``POS_MODE_PIXEL``：直接把手绘区域像素掩膜当作可用表面，
           **完全绕开产品识别**，因此产品识别准不准都不影响缺陷落点。
         """
-        dm = self._draw_mask()
+        dm = self._draw_mask(kind)
         if self._pos_mode() == POS_MODE_PIXEL:
             if dm is None:
                 return None
@@ -1394,6 +1420,21 @@ class MainWindow(QMainWindow):
         if body.max() <= 0.1 and elec.max() <= 0.1:
             return None
         return {"body": body, "electrode": elec}
+
+    def _region_masks_by_kind(self, seg) -> dict:
+        """各启用类型（非划痕）自己的区域掩膜 {kind: {"body","electrode"}}。
+
+        多类型同启且各类型画了各自区域时，缺陷只落在自己的区域里；
+        某类型没有自己的区域时回退为全部区域（_region_masks_for 内部处理）。
+        """
+        out = {}
+        for k in self._enabled_kinds():
+            if k == "scratch":
+                continue
+            r = self._region_masks_for(seg, kind=k)
+            if r is not None:
+                out[k] = r
+        return out
 
     def _refresh_overlay(self, *_):
         """重画产品轮廓 / 限定范围叠加层（颜色、线宽、显隐或区域变化时调用）。"""
@@ -1746,7 +1787,8 @@ class MainWindow(QMainWindow):
             img, applied = apply_defects(self.current_image, settings, seed=seed,
                                          region_masks=region_masks,
                                          region_hint=self._draw_hint(),
-                                         scratch_paths=paths)
+                                         scratch_paths=paths,
+                                         region_masks_by_kind=self._region_masks_by_kind(seg))
 
             mid = (seg_overlay.astype(np.float32) if seg_overlay is not None
                    else self.current_image.astype(np.float32).copy())
@@ -1856,7 +1898,8 @@ class MainWindow(QMainWindow):
             img, applied = apply_defects(self.current_image, settings, seed=seed,
                                          region_masks=region_masks,
                                          region_hint=self._draw_hint(),
-                                         scratch_paths=paths)
+                                         scratch_paths=paths,
+                                         region_masks_by_kind=self._region_masks_by_kind(seg))
             # 与预览保持一致：把「缺陷位置微调」的累计偏移同样应用到保存结果
             _ox, _oy = getattr(self, "_defect_offset", (0, 0))
             if (_ox or _oy) and applied and getattr(self, "_defect_shift_base", None):
