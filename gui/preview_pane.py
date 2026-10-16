@@ -252,7 +252,11 @@ class PreviewPane(QWidget):
         self.btn_outline_color = QPushButton("■")
         self.btn_outline_color.setFixedSize(46, 24)
         self.btn_outline_color.setToolTip("点击选择产品轮廓线的颜色")
-        self._outline_color = (255, 80, 80)
+        # 默认「草绿色」（#67C23A）：色块样式与绘制取色同源，改一处同步改两处
+        self._outline_color = (103, 194, 58)
+        self.btn_outline_color.setStyleSheet(
+            f"background:rgb({self._outline_color[0]},"
+            f"{self._outline_color[1]},{self._outline_color[2]});")
         self.btn_outline_color.clicked.connect(self._pick_outline_color)
         bar.addWidget(self.btn_outline_color)
 

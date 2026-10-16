@@ -50,4 +50,4 @@ Thumbs.db
 desktop.ini
 
 # ---- 注意：dist/ 中的单文件 exe（dist/SynthDefectAI.exe）是有意提交的分发产物，
-#      故不忽略 dist/ 目录本身。若只想保留源码，删除下面这行即可。----
+#      故不忽略 dist/ 目录本身。若只想保留源码，删除下面这行即可。----dist/SynthDefectAI.running-old.exe

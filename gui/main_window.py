@@ -25,6 +25,7 @@ from core.mlcc_region import (product_outline_overlay, region_overlay,
                              segment_mlcc)
 from core.utils import clip01, imread, imwrite, list_images, to_u8
 
+from .app_meta import APP_AUTHOR, APP_NAME, APP_RELEASE_DATE, APP_TITLE, APP_VERSION
 from .image_view import ImageView, np_to_qpixmap
 from .preview_pane import POS_MODE_PIXEL, POS_MODE_PRODUCT, PreviewPane
 
@@ -672,7 +673,7 @@ class ThumbnailGallery(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("SynthDefect AI — MLCC 表面缺陷合成工具")
+        self.setWindowTitle(APP_TITLE)
         self.resize(1560, 940)
         # 最小尺寸按「三卡片 + 预览最小高度 + 底部行」实测取值，低于此值会互相挤压
         self.setMinimumSize(1180, 740)
@@ -789,6 +790,11 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         bl.addWidget(self.progress, 1)
         self.btn_preview = QPushButton("缺陷生成预览")
+        # 与「保存缺陷图」一致的强调样式：蓝底、深色（黑）字
+        self.btn_preview.setProperty("accent", True)
+        self.btn_preview.setMinimumHeight(36)
+        self.btn_preview.setMinimumWidth(140)
+        self.btn_preview.setToolTip("按当前参数生成一次缺陷预览")
         self.btn_preview.clicked.connect(self.refresh_preview)
         bl.addWidget(self.btn_preview)
         self.btn_save = QPushButton("保存缺陷图")
@@ -2077,17 +2083,31 @@ class MainWindow(QMainWindow):
 
     # ---------------- 杂项 ----------------
     def show_help(self):
-        QMessageBox.information(self, "使用说明", HELP_TEXT)
+        box = QMessageBox(QMessageBox.Icon.Information, "使用说明", HELP_HTML,
+                          parent=self)
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        box.exec()
 
     def show_about(self):
         QMessageBox.about(
-            self, "关于 SynthDefect AI",
-            "<h3>SynthDefect AI <span style='color:#98a2b3'>v1.11</span></h3>"
+            self, f"关于 {APP_NAME}",
+            f"<h3>{APP_NAME} "
+            f"<span style='color:#98a2b3'>V{APP_VERSION}</span></h3>"
             "<p>MLCC 表面缺陷合成工具：自动查找产品 → 约束缺陷落点 → "
             "合成划痕 / 脏污 / 异色 / 缺角。</p>"
             "<p>支持可旋转 ROI 手绘限定、划痕方向与颜色可调、"
             "缺陷明显度分级、预览缩放平移。</p>"
-            "<p>纯本地运行，无需联网、无需 GPU、无需大模型 API。</p>")
+            "<p>纯本地运行，无需联网、无需 GPU、无需大模型 API。</p>"
+            "<hr>"
+            f"<table cellpadding='2'>"
+            f"<tr><td style='color:#98a2b3'>当前版本：</td>"
+            f"<td>V{APP_VERSION}</td></tr>"
+            f"<tr><td style='color:#98a2b3'>作　　者：</td>"
+            f"<td>{APP_AUTHOR}</td></tr>"
+            f"<tr><td style='color:#98a2b3'>发布日期：</td>"
+            f"<td>{APP_RELEASE_DATE}</td></tr>"
+            f"</table>")
 
     def closeEvent(self, e):
         if self.worker is not None:
@@ -2100,92 +2120,41 @@ class MainWindow(QMainWindow):
         e.accept()
 
 
-HELP_TEXT = """\
-【适用场景】
-导入合格的 MLCC 产品照片，自动定位瓷体与端电极表面，
-只在产品表面合成「划痕 / 脏污 / 异色 / 缺角」缺陷，并支持明显 / 中等 / 不明显分级，
-用于扩充工业视觉检测模型的训练集。
-
-【操作步骤】
-1. 顶部「1 · 输入设置」卡片选择图片或文件夹导入 MLCC 原图。
-2. 「限定手绘区域」**默认开启**，在「原图 / 手绘区域」栏选择绘制方式：
-   · **画线条（划痕专用）**：**按住左键拖一条线**（松开即成一条划痕），
-     也可逐点点击画折线，双击 / 右键 / 回车 / 「结束当前线条」结束；
-     **划痕沿这条线生成，起止位置与手绘一致**。
-   · **画矩形区域**：拖拽画框，按住 **Ctrl 左键拖动**可旋转，
-     也可用第二行的「ROI角度」输入框或「＋90° / －90°」精确调整。
-   · **画笔涂抹**：按住左键自由涂抹（笔刷大小可调，笔刷仅在该模式下出现）。
-   手绘范围与产品区域**固定取交集**，画到产品外的部分不会生成缺陷。
-   绘制方式随启用的缺陷类型自动限制：**启用划痕 → 只能画线条**；
-   **启用其它类型 → 只能画矩形 / 画笔**。
-   没画完的线条，点「缺陷生成预览」或切换绘制模式时会自动提交。
-3. 「2 · 缺陷图生成配置」卡片顶部是缺陷名 Tab 分页，**启用开关就是每个
-   Tab 标签上的复选框**（默认同时只能启用一个缺陷类型；再开另一个会弹窗提示，
-   需先关闭当前已启用的类型。高级参数「同时生成缺陷种类」在卡片标题下方左侧，
-   改为 N 时最多可同时启用 N 个类型，弹窗提示数值随之联动）。
-   在各 Tab 内配置参数（明显度、强度、数量等），预览实时刷新。
-   **划痕默认开启**，其它类型默认关闭。
-   · 数量（条数 / 斑块数 / 区域数 / 崩缺数 / 黑点数…）默认 1、**上限 5**；
-     **数量也是原图中允许绘制的线条 / 区域个数上限**——画多了会自动
-     淘汰最早画的那个（比如条数=2 时画第 3 条线，第 1 条线被清除）；
-     画了 N 条线时，每条线生成 1 条划痕，起止位置与手绘一致；
-   · **数量 ≥2 时，「明显度」右侧出现「调整第几处」下拉**——选中第几处，
-     页面参数就对该处单独生效，让几处缺陷效果有差异、更逼真；
-     未单独调过的参数沿用页面基准值；数量为 1 时无此下拉；
-   · 划痕「弯曲度」0=近直线、1=明显蜿蜒（仅未画线、按区域方向自动生成时生效）；
-   · 划痕「颜色」-1=白 … +1=黑，0=随机暗/亮；「深浅」0.1~1.5 控制偏离原色的程度；
-   · 脏污 / 异色的「边缘模糊」0~2.5，默认 1.0（边缘为渐变过渡，没有硬边）。
-4. 输入设置卡片用「◀ 上一张 / 下一张 ▶」逐张查看。
-5. 设置每图张数、随机种子、输出目录，点底部「**保存缺陷图**」把当前这张预览
-   的缺陷图存到输出目录；点「**批量生成全部**」可对所有导入图片批量生成。
-   输出设置里只有「缺陷图」默认勾选，其余产物（掩膜 / 对比图 / 区域图 / 标注）默认关闭。
-
-【划痕的两种生成方式】
-· **手绘线条（预览）**：勾选「限定手绘区域」→ 选「画线条」→ **按住左键拖一条线**，
-  松开即成一条划痕；划痕严格沿这条线，起止点与手绘一致。
-  没画线时预览会提示「划痕待画线」，第三栏仍显示原图（不会空白）。
-· **批量生成**：批处理是逐图自动跑，没有手绘，
-  此时划痕按「目标表面长轴方向」自动生成（与 v1.8 行为一致）。
-
-【产品区域自动定位】
-区域检测已内置并常开：程序自动查找 MLCC 产品，
-绿色 = 瓷体，蓝色 = 端电极，缺陷不会落到背景上。
-
-【划痕方向与颜色】
-· 方向：不再随机。手绘了 ROI / 笔迹时沿绘制方向；未手绘时沿目标表面（瓷体/端电极）
-  的长轴方向，只保留 ±10° 的自然抖动。
-· 颜色：「颜色」滑条从白到黑连续可调；「深浅」控制发白/发黑的程度。
-  颜色取 0 时按「凹陷暗线 / 亮反光线」随机（与真实划痕一致）。
-
-【预览操作】
-· 滚轮缩放（以光标为锚点）；左键拖拽或中键拖拽平移
-· 双击画面 = 适应窗口；工具栏提供 适应 / 1:1 / ＋ / －
-· 三栏视图缩放同步
-
-【界面自适应】
-· 顶部三张卡片（输入 / 缺陷配置 / 输出）高度一致，
-  窗口变宽时参数行自动排成两列、变窄时回落单列，保证文字始终完整。
-· 预览工具条分两行（图像操作 / 状态信息），窄窗口下控件不会被挤扁。
-· 窗口最小尺寸 1180×720，再小会互相遮挡，故不再允许继续缩小。
-
-【手绘区域三种作用方式】
-· 与产品求交（推荐）：手绘 ∩ 自动产品，最稳妥
-· 并入产品区域：手绘区域被并入产品（可圈定自动漏检的目标）
-· 完全以手绘为准：忽略自动分割，完全按手绘范围生成
-
-【缺角缺陷】
-在产品角部沿断面方向崩掉一块：断面呈锯齿状贝壳纹，
-带颗粒感与深度阴影，可选延伸裂纹与细小碎屑。
-参数：缺角数 / 缺角尺寸 / 崩口深度 / 断面锯齿 / 延伸裂纹。
-
-【产物】
-· images/ 缺陷图 ｜ masks/<类型>/ 掩膜 ｜ region/ 区域分割图
-· previews/<类型>/ 三联对比图
-· labels/ YOLO txt ｜ annotations_voc/ VOC xml ｜ annotations_coco.json
-· dataset_info.json 记录全部参数与统计
-
-【提示】
-· 手绘区域仅对当前选中的那一张图片生效。
-· 抓拍建议：产品充满画面、与背景对比清晰。
-· 检测任务建议明显度选「随机混合」+ 多种子，覆盖困难样本谱系。
+HELP_HTML = """\
+<style>
+  h3 { margin: 2px 0 6px 0; }
+  .step { color:#4c9aff; font-weight:700; }
+  .note { color:#98a2b3; }
+  .sub { margin: 2px 0 2px 18px; }
+  .kw { color:#ffd166; }
+  p { margin: 4px 0; }
+</style>
+<h3>操 作 流 程</h3>
+<p><span class="step">第1步　导入本地图片</span><br>
+　　在顶部「1 · 输入设置」卡片选择图片或文件夹导入。<span class="note">「样本增强生成」默认不开启，不建议开启——开启后计算资源开销过大。</span></p>
+<p><span class="step">第2步　设置同时生成缺陷的种类数量</span><br>
+　　默认为 <span class="kw">1</span>；数值越大资源开销越大，可能会导致电脑卡顿。</p>
+<p><span class="step">第3步　开启 / 关闭缺陷类型</span><br>
+　　勾选 Tab 标签上的复选框启用对应类型。种类数量为 <span class="kw">1</span> 时只能开启 1 个，多开会有提示；<br>
+　　种类数量为 <span class="kw">N（N＞1）</span> 时可同时开启 N 个类型。</p>
+<p><span class="step">第4步　选择生成方式（缺陷位置）</span>
+<table cellpadding="1" cellspacing="0">
+<tr><td valign="top">　· <b>按图像坐标位置</b>（默认）：</td>
+<td>想在图像哪个位置生成缺陷，就把绘制区域画在哪。<br>
+　　微调位置：点击 <b>上移 / 下移 / 左移 / 右移</b> 按钮，每点击一次移动 <span class="kw">1 个像素</span>。</td></tr>
+<tr><td valign="top">　· <b>限定在产品轮廓内</b>：</td>
+<td><span class="note">目前产品识别算法受图像质量影响较大，会识别不准，<b>不建议使用</b>；<br>
+　　后续会增强产品的定位检测功能。</span></td></tr>
+</table></p>
+<p><span class="step">第5步　选择绘制方式</span><br>
+　　每种缺陷类型均有默认的绘制方式：<b>划痕</b>类型只能使用<b>画线条</b>方式；<br>
+　　其它类型使用<b>画笔涂抹</b>或<b>画矩形框</b>的方式。</p>
+<p><span class="step">第6步　点击「缺陷生成预览」</span><br>
+　　可看到生成进度，以及按默认缺陷参数生成的效果；若效果不理想，调节缺陷生成参数可实时看到变化。<br>
+　　缺陷生成数量 ≥2（目前设置上限为 <span class="kw">5</span>）时，可用「调整第几处」选择第几处缺陷进行单独调节。<br>
+　　图像显示：支持 <span class="kw">100%</span> 显示、自适应窗口显示；支持鼠标滚轮放大缩小，也可点击「＋ / －」。</p>
+<p><span class="step">第7步　保存图片</span><br>
+　　在「输出设置」中设置图片保存路径，按需勾选<b>缺陷图 / 掩膜 / 对比图</b>等（默认只勾选存缺陷图），<br>
+　　然后点击「<b>保存缺陷图</b>」即可。</p>
+<p class="note">提示：手绘区域仅对当前选中的那一张图片生效；抓拍建议产品充满画面、与背景对比清晰。</p>
 """
