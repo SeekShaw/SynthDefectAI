@@ -220,7 +220,7 @@ class DefectPage(QWidget):
 
         if kind == "scratch":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.55))
-            self._add("count", "条数", 1, 40, cfg.get("count", 1), integer=True)
+            self._add("count", "条数", 1, 5, cfg.get("count", 1), integer=True)
             self._add("length_ratio", "长度比", 0.05, 1.5, cfg.get("length_ratio", 0.55))
             self._add("width_px", "线宽px", 0.5, 12.0, cfg.get("width_px", 2.2))
             self._add("curve", "弯曲度", 0.0, 1.0, cfg.get("curve", 0.55))
@@ -228,7 +228,7 @@ class DefectPage(QWidget):
             self._add("tone_depth", "深浅", 0.1, 1.5, cfg.get("tone_depth", 0.85))
         elif kind == "smudge":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
-            self._add("blob_count", "斑块数", 1, 20, cfg.get("blob_count", 1), integer=True)
+            self._add("blob_count", "斑块数", 1, 5, cfg.get("blob_count", 1), integer=True)
             self._add("blob_scale", "斑块尺寸", 0.05, 0.8, cfg.get("blob_scale", 0.30))
             self._add("coverage", "覆盖率", 0.02, 0.9, cfg.get("coverage", 0.35))
             self._add("edge_soft", "边界柔和度", 0.0, 1.0, cfg.get("edge_soft", 0.70))
@@ -242,7 +242,7 @@ class DefectPage(QWidget):
             self._items.append(self._labeled("污染色", cb))
         elif kind == "discolor":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
-            self._add("region_count", "区域数", 1, 12, cfg.get("region_count", 1), integer=True)
+            self._add("region_count", "区域数", 1, 5, cfg.get("region_count", 1), integer=True)
             self._add("region_scale", "区域尺寸", 0.05, 0.9, cfg.get("region_scale", 0.35))
             self._add("sat_gain", "色度增益", 0.5, 2.0, cfg.get("sat_gain", 1.25))
             self._add("lum_shift", "明暗偏移", -40, 40, cfg.get("lum_shift", -8), step=1)
@@ -260,7 +260,7 @@ class DefectPage(QWidget):
             self._add_color_picker("选择异色目标色")
         elif kind == "chip":
             self._add("strength", "崩缺强度", 0.0, 1.0, cfg.get("strength", 0.60))
-            self._add("count", "崩缺数", 1, 12, cfg.get("count", 1), integer=True)
+            self._add("count", "崩缺数", 1, 5, cfg.get("count", 1), integer=True)
             self._add("size_ratio", "崩缺长度", 0.03, 0.60, cfg.get("size_ratio", 0.22))
             self._add("depth_ratio", "崩缺深度", 0.05, 0.80, cfg.get("depth_ratio", 0.30))
             self._add("jag_ratio", "崩口锯齿", 0.05, 0.90, cfg.get("jag_ratio", 0.45))
@@ -270,7 +270,7 @@ class DefectPage(QWidget):
             self._add("crack_ratio", "延伸裂纹", 0.0, 0.90, cfg.get("crack_ratio", 0.30))
         elif kind == "dot":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
-            self._add("count", "黑点数", 1, 120, cfg.get("count", 1), integer=True)
+            self._add("count", "黑点数", 1, 5, cfg.get("count", 1), integer=True)
             self._add("size_ratio", "黑点大小", 0.002, 0.06, cfg.get("size_ratio", 0.010))
             self._add("darkness", "颜色深度", 0.2, 1.0, cfg.get("darkness", 0.88))
             self._add("edge_soft", "边界柔和度", 0.0, 1.0, cfg.get("edge_soft", 0.65))
@@ -286,7 +286,7 @@ class DefectPage(QWidget):
             self._add_color_picker("选择黑点颜色")
         elif kind == "pit":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
-            self._add("count", "凹坑数", 1, 120, cfg.get("count", 1), integer=True)
+            self._add("count", "凹坑数", 1, 5, cfg.get("count", 1), integer=True)
             self._add("size_ratio", "凹坑大小", 0.003, 0.08, cfg.get("size_ratio", 0.011))
             self._add("depth", "凹陷深度", 0.05, 1.0, cfg.get("depth", 0.55))
             self._add("highlight", "坑内高光", 0.0, 1.5, cfg.get("highlight", 0.55))
@@ -294,7 +294,7 @@ class DefectPage(QWidget):
                       cfg.get("light_deg", 135.0), step=1)
         elif kind == "bump":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
-            self._add("count", "鼓包数", 1, 40, cfg.get("count", 1), integer=True)
+            self._add("count", "鼓包数", 1, 5, cfg.get("count", 1), integer=True)
             self._add("size_ratio", "鼓包大小", 0.003, 0.08, cfg.get("size_ratio", 0.012))
             self._add("height", "凸起高度", 0.05, 1.0, cfg.get("height", 0.55))
             self._add("gloss", "顶部高光", 0.0, 1.5, cfg.get("gloss", 0.40))
@@ -312,7 +312,7 @@ class DefectPage(QWidget):
             self._add_color_picker("选择鼓包颜色")
         elif kind == "debris":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
-            self._add("count", "异物数", 1, 40, cfg.get("count", 1), integer=True)
+            self._add("count", "异物数", 1, 5, cfg.get("count", 1), integer=True)
             self._add("size_ratio", "异物大小", 0.004, 0.10, cfg.get("size_ratio", 0.013))
             self._add("shadow", "投影强度", 0.0, 1.0, cfg.get("shadow", 0.45))
             self._add("gloss", "高光", 0.0, 1.5, cfg.get("gloss", 0.35))
@@ -389,7 +389,11 @@ class DefectPage(QWidget):
         ln.setStyleSheet("color:#2e353f; background:#2e353f; max-height:1px;")
         return ln
 
-    def _add(self, key, label, vmin, vmax, value, step=0.01, integer=False):
+    def _add(self, key, label, vmin, vmax, value, step=None, integer=False):
+        # integer 行默认步长必须是 1：若沿用 0.01，QDoubleSpinBox 每次 +0.01
+        # 再按 0 位小数四舍五入，值永远不变（表现为上下箭头「点击无效」）。
+        if step is None:
+            step = 1.0 if integer else 0.01
         r = SliderRow(label, vmin, vmax, value, step=step, integer=integer)
         r.valueChanged.connect(lambda *_v, k=key: self._on_param_changed(k))
         self.rows[key] = r
@@ -683,6 +687,7 @@ class MainWindow(QMainWindow):
         self.aug_results: list = []     # [(img, applied), ...] 增强模式生成的样本
         self.aug_selected: int = -1     # 当前在画廊中选中的样本下标
         self._adjusting = False        # 卡片等高重算防重入
+        self._split_sized = False      # 首次显示时按「输出设置」卡宽定右列初宽
         self._top_h = 0                # 顶部三卡片的统一高度
 
         # 状态栏先于界面构建创建：_defect_card() 会同步 Tab 标题并写状态栏
@@ -813,6 +818,21 @@ class MainWindow(QMainWindow):
         """窗口显示后按真实布局高度统一三张卡片高度（保证文字不裁切）。"""
         super().showEvent(e)
         self._equalize_cards()
+        # 首次显示：右侧缩略图列初宽 = 「输出设置」卡片宽度（布局稳定后再设）
+        if not self._split_sized:
+            self._split_sized = True
+            QTimer.singleShot(0, self._init_split_sizes)
+
+    def _init_split_sizes(self):
+        """让右列（缩略图/放大图）初始占宽与 3·输出设置 卡片一致，其余给预览区。"""
+        try:
+            w_out = self._card_out.width()
+            if w_out <= 0:
+                return
+            avail = self.split_main.width() - self.split_main.handleWidth()
+            self.split_main.setSizes([max(avail - w_out, 240), w_out])
+        except Exception:
+            pass
 
     def resizeEvent(self, e):
         """窗口尺寸变化后重算卡片高度 / 参数列数（窄屏回落单列）。"""
@@ -1003,8 +1023,25 @@ class MainWindow(QMainWindow):
     def _defect_card(self) -> QGroupBox:
         gb = QGroupBox("  2 · 缺陷图生成配置  ")
         vp = QVBoxLayout(gb)
-        vp.setContentsMargins(12, 12, 12, 12)
-        vp.setSpacing(8)
+        vp.setContentsMargins(10, 8, 10, 8)
+        vp.setSpacing(5)
+
+        # 高级参数：同时生成缺陷种类（卡片标题下方行首，不挤占 Tab 栏）
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        lbl_lim = QLabel("同时生成缺陷种类")
+        lbl_lim.setProperty("role", "hint")
+        head.addWidget(lbl_lim)
+        self.sp_kind_limit = QSpinBox()
+        self.sp_kind_limit.setRange(1, len(DEFECT_KINDS))
+        self.sp_kind_limit.setValue(1)
+        self.sp_kind_limit.setToolTip(
+            "高级参数：允许同时启用的缺陷类型个数（默认 1）。\n"
+            "例如设为 2 时可同时勾选两个缺陷类型一起生成；\n"
+            "超过该数量再启用会弹窗提示。")
+        head.addWidget(self.sp_kind_limit)
+        head.addStretch(1)
+        vp.addLayout(head)
 
         # Tab 放在卡片顶部，标签即缺陷名；启用开关以复选框形式挂在每个
         # Tab 标签左侧（页外），一眼可见当前启用了哪一个
@@ -1028,24 +1065,6 @@ class MainWindow(QMainWindow):
                 lambda on, k=kind: self._on_defect_enable(k, on))
         self._sync_tab_titles()
 
-        # 高级参数：同时生成缺陷种类（放在 Tab 栏右上角，不占额外行高）
-        cw = QWidget()
-        chw = QHBoxLayout(cw)
-        chw.setContentsMargins(0, 0, 8, 0)
-        chw.setSpacing(4)
-        lbl_lim = QLabel("同时生成缺陷种类")
-        lbl_lim.setProperty("role", "hint")
-        chw.addWidget(lbl_lim)
-        self.sp_kind_limit = QSpinBox()
-        self.sp_kind_limit.setRange(1, len(DEFECT_KINDS))
-        self.sp_kind_limit.setValue(1)
-        self.sp_kind_limit.setToolTip(
-            "高级参数：允许同时启用的缺陷类型个数（默认 1）。\n"
-            "例如设为 2 时可同时勾选两个缺陷类型一起生成；\n"
-            "超过该数量再启用会弹窗提示。")
-        chw.addWidget(self.sp_kind_limit)
-        self.tabs.setCornerWidget(cw, Qt.Corner.TopRightCorner)
-        cw.setVisible(True)
         vp.addWidget(self.tabs, 1)
         return gb
 
@@ -2102,11 +2121,11 @@ HELP_TEXT = """\
    没画完的线条，点「缺陷生成预览」或切换绘制模式时会自动提交。
 3. 「2 · 缺陷图生成配置」卡片顶部是缺陷名 Tab 分页，**启用开关就是每个
    Tab 标签上的复选框**（默认同时只能启用一个缺陷类型；再开另一个会弹窗提示，
-   需先关闭当前已启用的类型。高级参数「同时生成缺陷种类」在 Tab 栏右上角，
+   需先关闭当前已启用的类型。高级参数「同时生成缺陷种类」在卡片标题下方左侧，
    改为 N 时最多可同时启用 N 个类型，弹窗提示数值随之联动）。
    在各 Tab 内配置参数（明显度、强度、数量等），预览实时刷新。
    **划痕默认开启**，其它类型默认关闭。
-   · 数量（条数 / 斑块数 / 区域数 / 崩缺数 / 黑点数…）默认 1；
+   · 数量（条数 / 斑块数 / 区域数 / 崩缺数 / 黑点数…）默认 1、**上限 5**；
      **数量也是原图中允许绘制的线条 / 区域个数上限**——画多了会自动
      淘汰最早画的那个（比如条数=2 时画第 3 条线，第 1 条线被清除）；
      画了 N 条线时，每条线生成 1 条划痕，起止位置与手绘一致；

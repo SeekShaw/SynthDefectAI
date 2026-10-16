@@ -66,6 +66,10 @@ def main():
     H, W = win.current_image.shape[:2]
     view = win.preview.views[0]
 
+    # 本脚本需同时启用 脏污/异色/崩缺 三类；默认上限 1 会触发互斥弹窗
+    # （offscreen 下模态阻塞），因此先把「同时生成缺陷种类」上调。
+    win.sp_kind_limit.setValue(len(KINDS))
+
     def brush(fy):
         view.set_mode(view.MODE_BRUSH)
         view.set_brush_radius(16)

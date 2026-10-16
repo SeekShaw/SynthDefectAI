@@ -157,9 +157,15 @@ def main() -> int:
     check(win.sp_kind_limit.value() == 1
           and win.sp_kind_limit.minimum() == 1,
           "高级参数「同时生成缺陷种类」默认值为 1")
-    _cw = win.tabs.cornerWidget()
-    check(_cw is not None and win.sp_kind_limit in _cw.findChildren(QSpinBox),
-          "「同时生成缺陷种类」位于缺陷配置卡 Tab 栏右上角（高级参数）")
+    # 第十一轮：从 Tab 栏角落移到缺陷卡标题下方行首（不再用 cornerWidget）
+    check(win.tabs.cornerWidget() is None
+          and win.sp_kind_limit in win._card_def.findChildren(QSpinBox),
+          "「同时生成缺陷种类」位于缺陷卡标题下左侧（高级参数）")
+    # 第十一轮：各类型生成数量上限 5，整数行步长必须为 1（否则箭头点击无效）
+    check(all(p.rows[k].spin.maximum() == 5 and p.rows[k].spin.singleStep() == 1
+              for p in win.pages.values()
+              for k in (p._count_key,)),
+          "各类型生成数量上限 5 且步长 1（箭头可用）")
     win.sp_kind_limit.setValue(2)
     win.pages["smudge"].enable.setChecked(True)      # 上限 2 → 允许第 2 个
     app.processEvents()
