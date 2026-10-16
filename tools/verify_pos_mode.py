@@ -153,8 +153,8 @@ def main():
 
     print("[3] 模式①产品轮廓内：区域画在产品外 → 明确提示，不生成")
     draw_rect(out_rect)
-    check("未覆盖产品表面" in info() or "没有可用" in info(),
-          "给出「手绘区域未覆盖产品表面」提示：%s" % info()[:40])
+    check("绘制区域不在限定范围内" in info() or "未覆盖产品表面" in info(),
+          "给出「绘制区域不在限定范围内」提示：%s" % info()[:40])
 
     print("[4] 模式②按图像坐标位置：区域画在产品外 → 仍正常生成")
     set_mode(POS_MODE_PIXEL)

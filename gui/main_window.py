@@ -1368,6 +1368,71 @@ class MainWindow(QMainWindow):
             return None
         return self.preview.region_hint()
 
+    # ---------------- 绘制区域与产品轮廓的交集校验 ----------------
+    def _scratch_lines_exist(self) -> bool:
+        """是否已绘制划痕用的手绘线条（启用绘制且存在线条）。"""
+        return bool(self.preview.draw_enabled()
+                    and self.preview.has_line_regions()
+                    and self._draw_paths())
+
+    def _scratch_all_outside(self, seg) -> bool:
+        """划痕线条是否**全部**落在产品轮廓之外（产品模式下才有意义）。
+
+        只要任一条线的任一采样点落在产品表面（body∪electrode）内，即判为「在范围内」。
+        """
+        if seg is None or not getattr(seg, "ok", False):
+            return False
+        if not self._scratch_lines_exist():
+            return False
+        prod = np.maximum(seg.body, seg.electrode) > 0.5
+        h, w = prod.shape
+        for p in self._draw_paths():
+            pts = np.asarray(p, dtype=np.float64)
+            if pts.size == 0:
+                continue
+            # 短线条（如 2 点）逐点检查；长线条（已重采样）适当降采样即可
+            step = max(1, len(pts) // 30)
+            for (x, y) in pts[::step]:
+                xi, yi = int(round(x)), int(round(y))
+                if 0 <= yi < h and 0 <= xi < w and prod[yi, xi]:
+                    return False
+        return True
+
+    def _region_out_of_scope(self, seg, region_masks):
+        """「限定在产品轮廓内」模式下，判断用户绘制的区域是否完全在轮廓外。
+
+        返回 ``(need_block, msg)``：``need_block=True`` 表示应停止生成并提示
+        「绘制区域不在限定范围内」。
+
+        覆盖两类手绘：
+        · 矩形/多边形/画笔：与产品轮廓求交集后整块落空（region_masks 为 None）。
+        · 划痕线条：所有线条均落在产品轮廓之外。
+        任一绘制物在范围内即视为可用，不阻塞（例如矩形在范围内、线条在外时
+        仍按矩形范围生成，线条自动被轮廓裁剪不产生划痕）。
+        """
+        if self._pos_mode() != POS_MODE_PRODUCT:
+            return False, ""
+        drew_rect = self._draw_mask() is not None
+        rect_usable = region_masks is not None   # 有交集 或 根本没画矩形(=整产品可用)
+        scratch_exists = self._scratch_lines_exist()
+        scratch_usable = scratch_exists and not self._scratch_all_outside(seg)
+        drew_any = drew_rect or scratch_exists
+        # 仅统计「实际绘制」的区域是否可用：没画矩形就不能用矩形可用性顶替划痕。
+        rect_drawn_usable = drew_rect and rect_usable
+        scratch_drawn_usable = scratch_exists and scratch_usable
+        usable_any = rect_drawn_usable or scratch_drawn_usable
+        if not drew_any or usable_any:
+            return False, ""
+        if drew_rect and not rect_usable:
+            msg = ("绘制区域不在限定范围内：手绘的限定区域与产品轮廓没有交集，"
+                   "请把限定区域画在产品上，或改用「按图像坐标位置」。")
+        elif scratch_exists:
+            msg = ("绘制区域不在限定范围内：手绘划痕线条未落在产品轮廓内，"
+                   "请把划痕画在产品上，或改用「按图像坐标位置」。")
+        else:
+            msg = "绘制区域不在限定范围内，请把区域画在产品轮廓内。"
+        return True, msg
+
     def _hint_note(self) -> str:
         n = len(self._draw_paths())
         if n:
@@ -1768,6 +1833,10 @@ class MainWindow(QMainWindow):
         seg_overlay = None
         if seg is not None and seg.ok:
             seg_overlay = region_overlay(self.current_image, seg)
+        # 产品轮廓表面（body∪electrode）：「限定在产品轮廓内」模式下用于把
+        # 划痕裁剪到轮廓内；像素坐标模式下为 None（划痕沿整条线生成）。
+        product_region = (np.maximum(seg.body, seg.electrode)
+                          if (seg is not None and seg.ok) else None)
 
         # 划痕只认「手绘线条」：勾选了划痕但没画线时跳过，并在信息栏提示
         paths = self._draw_paths()
@@ -1801,20 +1870,14 @@ class MainWindow(QMainWindow):
         try:
             seed = int(self.sp_seed.value())
             region_masks = self._region_masks_for(seg)
-            # 限定了手绘区域却算不出可用区域时，不生成缺陷并明确说明原因。
-            # 两种模式的原因不同：产品轮廓模式是「手绘区没画到产品上」，
-            # 像素坐标模式则不应发生（区域就是手绘掩膜本身）。
-            dm = self._draw_mask()
-            if dm is not None and region_masks is None:
+            # 限定在产品轮廓内时，手绘区域若与产品轮廓无任何交集，停止生成并提示。
+            # 覆盖矩形/多边形/画笔 与 划痕线条 两类手绘。
+            need_block, msg = self._region_out_of_scope(seg, region_masks)
+            if need_block:
                 self._defect_shift_base = None
                 self.preview.set_images(self.current_image, seg_overlay,
                                         self.current_image)
                 self.defect_view.set_image(self.current_image)
-                if self._pos_mode() == POS_MODE_PIXEL:
-                    msg = "手绘区域无效，请重新绘制限定区域"
-                else:
-                    msg = ("手绘区域未覆盖产品表面（缺陷位置方式为「限定在产品轮廓内」）。"
-                           "请把限定区域画在产品上，或改用「按图像坐标位置」")
                 self.preview.set_info(msg)
                 self.status.showMessage(msg)
                 return
@@ -1822,7 +1885,8 @@ class MainWindow(QMainWindow):
                                          region_masks=region_masks,
                                          region_hint=self._draw_hint(),
                                          scratch_paths=paths,
-                                         region_masks_by_kind=self._region_masks_by_kind(seg))
+                                         region_masks_by_kind=self._region_masks_by_kind(seg),
+                                         product_region=product_region)
 
             mid = (seg_overlay.astype(np.float32) if seg_overlay is not None
                    else self.current_image.astype(np.float32).copy())
@@ -1930,23 +1994,22 @@ class MainWindow(QMainWindow):
             # 与预览一致：「按图像坐标位置」不执行产品轮廓检测
             seg = (self._ensure_segmentation()
                    if self._pos_mode() == POS_MODE_PRODUCT else None)
+            # 产品轮廓表面（body∪electrode）：用于把划痕裁剪到轮廓内
+            product_region = (np.maximum(seg.body, seg.electrode)
+                              if (seg is not None and getattr(seg, "ok", False))
+                              else None)
             region_masks = self._region_masks_for(seg)
-            # 与预览一致：算不出可用区域时直接不生成，避免缺陷洒满整图
-            if self._draw_mask() is not None and region_masks is None:
-                tip = ("请把限定区域画在产品表面上。"
-                       if self._pos_mode() == POS_MODE_PRODUCT else
-                       "请重新绘制限定区域。")
-                QMessageBox.information(
-                    self, "未生成缺陷",
-                    "手绘区域没有可用的生成范围。\n\n" + tip
-                    + "\n\n（可在「缺陷位置」里改为「按图像坐标位置」，"
-                      "此时不受产品识别影响）")
+            # 与预览一致：绘制区域与产品轮廓无交集时停止生成并提示
+            need_block, msg = self._region_out_of_scope(seg, region_masks)
+            if need_block:
+                QMessageBox.information(self, "未生成缺陷", msg)
                 return
             img, applied = apply_defects(self.current_image, settings, seed=seed,
                                          region_masks=region_masks,
                                          region_hint=self._draw_hint(),
                                          scratch_paths=paths,
-                                         region_masks_by_kind=self._region_masks_by_kind(seg))
+                                         region_masks_by_kind=self._region_masks_by_kind(seg),
+                                         product_region=product_region)
             # 与预览保持一致：把「缺陷位置微调」的累计偏移同样应用到保存结果
             _ox, _oy = getattr(self, "_defect_offset", (0, 0))
             if (_ox or _oy) and applied and getattr(self, "_defect_shift_base", None):
@@ -2254,6 +2317,8 @@ HELP_HTML = """\
 　　微调位置：点击 <b>上移 / 下移 / 左移 / 右移</b> 按钮，每点击一次移动 <span class="kw">1 个像素</span>。</td></tr>
 <tr><td valign="top">　· <b>限定在产品轮廓内</b>：</td>
 <td>此模式下才执行<b>产品轮廓检测并显示</b>（「显示产品轮廓」等控件仅在此时可用）。<br>
+　　缺陷只生成在<b>产品轮廓 ∩ 绘制区域</b>的交集内；若绘制的区域（矩形/画笔/线条）<br>
+　　完全落在产品轮廓之外，会提示「<span class="kw">绘制区域不在限定范围内</span>」，不生成缺陷。<br>
 <span class="note">目前产品识别算法受图像质量影响较大，会识别不准，<b>不建议使用</b>；<br>
 　　后续会增强产品的定位检测功能。</span></td></tr>
 </table></p>

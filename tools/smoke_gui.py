@@ -1124,7 +1124,7 @@ def main() -> int:
     check(abs(v._scale() - 1.0) < 1e-3, f"1:1 后缩放为 1.0（{v._scale():.4f}）")
 
     # ================= 需求：缺陷位置像素级微调 =================
-    from gui.main_window import _shift_arr
+    from gui.main_window import _shift_arr, POS_MODE_PIXEL, POS_MODE_PRODUCT
     _a = np.arange(12, dtype=np.float32).reshape(3, 4)
     _s = _shift_arr(_a, 1, 0)
     check(_s[0, 1] == _a[0, 0] and _s[0, 0] == 0 and _s[2, 3] == _a[2, 2],
@@ -1366,6 +1366,77 @@ def main() -> int:
               f"回归：保存图=移动后预览（最大差 {_md:.2f}，偏移 {win._defect_offset}）")
     else:
         check(False, "回归：移动后保存应产生文件")
+
+    # ================= 回归：限定在产品轮廓内——交集生成与「区域在轮廓外」提示 =================
+    DEBUG_OUTLINE = bool(os.environ.get("SMOKE_DEBUG_OUTLINE"))
+    _oi3 = _QMB.information
+    _QMB.information = staticmethod(lambda *a, **k: _QMB.StandardButton.Ok)
+    _orig_dm = win._draw_mask
+    _orig_dp = win._draw_paths
+    _orig_de = win.preview.draw_enabled
+    _orig_hdr = win.preview.has_drawn_regions
+    _orig_hlr = getattr(win.preview, "has_line_regions", None)
+    try:
+        win._preview_timer.stop()
+        # stub 绘制状态：smoke 会话没有真实手绘，让 _draw_mask 走区域分支
+        win.preview.draw_enabled = lambda: True
+        win.preview.has_drawn_regions = lambda: True
+        if _orig_hlr is not None:
+            win.preview.has_line_regions = lambda: False
+        win.preview.cmb_posmode.setCurrentIndex(
+            win.preview.cmb_posmode.findData(POS_MODE_PRODUCT))
+        app.processEvents()
+        # 确保启用的是非划痕类型（划痕无线条时会走「待画线」分支，绕过范围检查）
+        win._mutual_lock = True
+        for p in win.pages.values():
+            p.enable.setChecked(False)
+        win.pages["smudge"].enable.setChecked(True)
+        win._mutual_lock = False
+        app.processEvents()
+        _seg_p = win._ensure_segmentation()
+        _prod = np.maximum(_seg_p.body, _seg_p.electrode) > 0.5
+        _h, _w = _prod.shape
+
+        # 1) 矩形框完全画在产品外 -> 提示「绘制区域不在限定范围内」，不生成
+        _rect_out = np.zeros((_h, _w), np.float32)
+        _rect_out[5:55, 5:55] = 1.0
+        win._draw_mask = lambda kind=None: _rect_out.copy()
+        win._draw_paths = lambda: []
+        win.refresh_preview()
+        app.processEvents()
+        if DEBUG_OUTLINE:
+            print(f"    [dbg] pos_mode={win._pos_mode()} kinds_on="
+                  f"{[k for k, p in win.pages.items() if p.enable.isChecked()]} "
+                  f"dm={win._draw_mask() is not None} "
+                  f"info={win.preview.lbl_info.text()[:30]!r}", flush=True)
+        check(win._defect_shift_base is None,
+              "产品模式：矩形框完全在产品外 -> 不生成缺陷")
+        check("绘制区域不在限定范围内" in win.preview.lbl_info.text(),
+              "产品模式：矩形框完全在产品外 -> 有明确提示")
+
+        # 2) 矩形框部分在轮廓内 -> 不提示，缺陷只生成在轮廓与矩形的交集内
+        _rect_part = np.zeros((_h, _w), np.float32)
+        _rect_part[:, :] = 1.0        # 全图矩形 = 与轮廓的交集即整个产品
+        win._draw_mask = lambda kind=None: _rect_part.copy()
+        win.refresh_preview()
+        app.processEvents()
+        check(win._defect_shift_base is not None,
+              "产品模式：矩形与轮廓有交集 -> 正常生成")
+        _mk = win._defect_shift_base[3] > 0.35
+        _inside = float((_mk & _prod).sum()) / max(1, _mk.sum())
+        check(_inside >= 0.97,
+              f"产品模式：缺陷全部落在产品轮廓内（交集比 {_inside:.2%}）")
+    finally:
+        _QMB.information = _oi3
+        win._draw_mask = _orig_dm
+        win._draw_paths = _orig_dp
+        win.preview.draw_enabled = _orig_de
+        win.preview.has_drawn_regions = _orig_hdr
+        if _orig_hlr is not None:
+            win.preview.has_line_regions = _orig_hlr
+        win.preview.cmb_posmode.setCurrentIndex(
+            win.preview.cmb_posmode.findData(POS_MODE_PIXEL))
+        app.processEvents()
 
     win.close()
     if FAIL:

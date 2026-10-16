@@ -1294,7 +1294,8 @@ def resolve_target(target: str, region_masks: Optional[dict]) -> Optional[np.nda
 def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
                   region_masks: Optional[dict] = None, progress=None,
                   region_hint=None, scratch_paths=None,
-                  region_masks_by_kind: Optional[dict] = None):
+                  region_masks_by_kind: Optional[dict] = None,
+                  product_region: Optional[np.ndarray] = None):
     """按 settings 依次叠加多类缺陷。
 
     settings 形如::
@@ -1320,6 +1321,12 @@ def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
                           多类型同启、各类型用自己画的区域时提供；
                           某类型缺省时回退到共用 region_masks。
 
+    product_region: 可选，产品轮廓表面掩膜（body∪electrode），仅在
+                    ``限定在产品轮廓内`` 模式下非 None。用于把**划痕**（手绘
+                    线条）裁剪到产品轮廓内——线条落在轮廓外的部分不生成缺陷，
+                    整条线都在轮廓外时该划痕不产生。像素坐标模式下为 None，
+                    划痕沿整条手绘线生成（不受产品识别影响）。
+
     返回 (image, applied) —— applied 是 [DefectResult, ...]，按应用顺序。
     """
     rng = Rng(seed)
@@ -1343,7 +1350,9 @@ def apply_defects(rgb: np.ndarray, settings: dict, seed: Optional[int] = None,
             # 此时的手绘矩形/画笔区域是「其它缺陷类型」的限定范围，
             # 不应再约束划痕（否则多类型同启时划痕会被别的类型的
             # 限定区域挤掉，表现为「只剩最后启用的那个缺陷」）。
-            region = None
+            # 但「限定在产品轮廓内」模式下，划痕仍需被产品轮廓裁剪：
+            # 落在轮廓外的线头不生成缺陷，整条线都在轮廓外则不产生划痕。
+            region = product_region
 
         gen = DEFECT_REGISTRY.get(kind)
         if gen is None:
