@@ -7,8 +7,8 @@ import sys
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QKeySequence
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal, QSize
+from PyQt6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap
 from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComboBox,
                              QDoubleSpinBox, QFileDialog, QFrame, QGridLayout,
                              QGroupBox, QHBoxLayout, QInputDialog, QLabel,
@@ -591,7 +591,8 @@ class DefectPage(QWidget):
 # 主窗口
 # --------------------------------------------------------------------------
 class ThumbnailGallery(QWidget):
-    """增强样本缩略图画廊：生成的多张缺陷图以缩略图网格展示，点击即选中。"""
+    """增强样本缩略图画廊：生成的多张缺陷图以单行横向滚动缩略图展示，点击即选中。
+    顶部放置「缺陷样本增强模式」与「生成图片数量」设置（从输入卡移入）。"""
 
     selected = pyqtSignal(int)
 
@@ -605,16 +606,48 @@ class ThumbnailGallery(QWidget):
         cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cap.setProperty("role", "title")
         lay.addWidget(cap)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.grid = QWidget()
-        self.gl = QGridLayout(self.grid)
-        self.gl.setSpacing(8)
-        self.scroll.setWidget(self.grid)
-        lay.addWidget(self.scroll, 1)
+
+        # 缺陷样本增强生成及数量设置：移动到画廊顶部
+        self.cb_augment = QCheckBox("缺陷样本增强模式")
+        self.sp_aug_count = QSpinBox()
+        self.sp_aug_count.setRange(1, 100)
+        self.sp_aug_count.setValue(6)
+        self.sp_aug_count.setSuffix(" 张")
+        self.sp_aug_count.setEnabled(False)
+        self.sp_aug_count.setFixedWidth(96)
+        ra = QHBoxLayout()
+        ra.setSpacing(6)
+        ra.addWidget(self.cb_augment)
+        ra.addSpacing(24)          # 与「生成图片数量」拉开距离
+        ra.addWidget(QLabel("生成图片数量"))
+        ra.addWidget(self.sp_aug_count)
+        ra.addStretch(1)
+        lay.addLayout(ra)
+
+        # 单行横向滚动缩略图：图标列表左→右流式、不换行，超出则出现横向滚动条
+        self.list = QListWidget()
+        self.list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.list.setFlow(QListWidget.Flow.LeftToRight)
+        self.list.setWrapping(False)
+        self.list.setResizeMode(QListWidget.ResizeMode.Fixed)
+        self.list.setMovement(QListWidget.Movement.Static)
+        self.list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.list.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list.setIconSize(QSize(96, 96))
+        self.list.setGridSize(QSize(108, 134))
+        self.list.setSpacing(8)
+        self.list.setWordWrap(True)
+        self.list.setMaximumHeight(150)
+        self.list.setStyleSheet(
+            "QListWidget{background:#0e1013; border:1px solid #2e353f; "
+            "border-radius:6px;}"
+            "QListWidget::item{border:1px solid #2e353f; border-radius:6px;}"
+            "QListWidget::item:selected{border:2px solid #4c9aff;}")
+        self.list.currentItemChanged.connect(self._on_current)
+        lay.addWidget(self.list, 1)
         self.images: list = []
-        self.thumbs: list = []
         self.current = -1
         self._placeholder()
 
@@ -625,65 +658,48 @@ class ThumbnailGallery(QWidget):
         tip.setWordWrap(True)
         tip.setProperty("role", "hint")
         tip.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.gl.addWidget(tip, 0, 0)
+        item = QListWidgetItem()
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setData(Qt.ItemDataRole.UserRole, -1)
+        self.list.addItem(item)
+        self.list.setItemWidget(item, tip)
 
     def clear(self):
-        while self.gl.count():
-            item = self.gl.takeAt(0)
-            w = item.widget() if item is not None else None
-            if w is not None:
-                w.setParent(None)
+        self.list.clear()
         self.images = []
-        self.thumbs = []
         self.current = -1
 
     def set_thumbnails(self, images: list, captions=None):
         self.clear()
         self.images = list(images)
-        cols = 2
+        if not self.images:
+            self._placeholder()
+            return
         for i, img in enumerate(self.images):
-            cell = self._make_cell(
-                img, i, (captions[i] if captions else f"#{i + 1}"))
-            self.gl.addWidget(cell, i // cols, i % cols)
-            self.thumbs.append(cell)
-        if self.images:
-            self._select(0)
+            pm = np_to_qpixmap(img).scaled(
+                110, 110, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            icon = QIcon(QPixmap.fromImage(pm))
+            cap = captions[i] if captions else f"#{i + 1}"
+            item = QListWidgetItem(icon, cap)
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.list.addItem(item)
+        self.list.setCurrentRow(0)
 
-    def _make_cell(self, img, idx, caption):
-        cell = QFrame()
-        cell.setFrameShape(QFrame.Shape.Box)
-        cell.setLineWidth(1)
-        cell.setStyleSheet(
-            "ThumbnailGallery QFrame{border:1px solid #2e353f; "
-            "border-radius:6px; background:#0e1013;}")
-        v = QVBoxLayout(cell)
-        v.setContentsMargins(4, 4, 4, 4)
-        v.setSpacing(2)
-        pm = np_to_qpixmap(img).scaled(
-            110, 110, Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation)
-        lab = QLabel()
-        lab.setPixmap(pm)
-        lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lab.setStyleSheet("background:#0e1013;")
-        v.addWidget(lab, 1)
-        cap = QLabel(caption)
-        cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cap.setProperty("role", "hint")
-        v.addWidget(cap)
-        cell.setCursor(Qt.CursorShape.PointingHandCursor)
-        cell.mousePressEvent = lambda _e, i=idx: self._select(i)
-        return cell
+    def _on_current(self, cur, _prev):
+        if cur is None:
+            return
+        idx = cur.data(Qt.ItemDataRole.UserRole)
+        if idx is None or idx < 0 or idx >= len(self.images):
+            return
+        self.current = idx
+        self.selected.emit(idx)
 
     def _select(self, idx):
         if idx < 0 or idx >= len(self.images):
             return
         self.current = idx
-        for i, t in enumerate(self.thumbs):
-            t.setStyleSheet(
-                "ThumbnailGallery QFrame{border:%s; border-radius:6px; background:#0e1013;}"
-                % ("2px solid #4c9aff" if i == idx else "1px solid #2e353f"))
-        self.selected.emit(idx)
+        self.list.setCurrentRow(idx)
 
 
 class MainWindow(QMainWindow):
@@ -691,8 +707,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
         self.resize(1560, 940)
-        # 最小尺寸按「三卡片 + 预览最小高度 + 底部行」实测取值，低于此值会互相挤压
-        self.setMinimumSize(1180, 740)
+        # 最小尺寸按「三卡片 + 预览最小高度 + 底部行 + 单行缩略图画廊」实测取值，
+        # 低于此值会互相挤压（画廊新增一行缩略图后由原 740 上调至 760）
+        self.setMinimumSize(1180, 760)
 
         self.input_paths: list[str] = []
         self.current_image: Optional[np.ndarray] = None
@@ -771,6 +788,15 @@ class MainWindow(QMainWindow):
         # 整列高度与左侧「原图 / 区域图 / 缺陷图」三栏一致
         self.gallery = ThumbnailGallery()
         self.gallery.selected.connect(self._on_thumb_selected)
+        # 增强设置控件已移入画廊顶部，这里重新挂回主窗口实例并连接信号
+        self.cb_augment = self.gallery.cb_augment
+        self.sp_aug_count = self.gallery.sp_aug_count
+        self.cb_augment.setToolTip(
+            "在左侧预览上手绘「大致区域」后勾选本项：\n"
+            "将按「生成图片数量」生成多张缺陷图（每张缺陷数由算法参数的「个数」决定），\n"
+            "缺陷类型/位置/形状随机；生成后在上方画廊点击缩略图可在下方查看大图。\n"
+            "未绘制区域时退化为整图随机生成。")
+        self.cb_augment.toggled.connect(self._on_augment_toggled)
 
         self.defect_view = ImageView()
         self.defect_view.setStyleSheet(
@@ -933,40 +959,13 @@ class MainWindow(QMainWindow):
 
         self.lst = QListWidget()
         self.lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        # 图片列表压到 ~130px：三张卡片是等高的，输入卡里列表最长，
-        # 列表每高一分就把下方「效果预览」挤掉一分（列表本身可滚动，不影响使用）。
-        self.lst.setMinimumHeight(84)
-        self.lst.setMaximumHeight(132)
+        # 图片名列表最大化：三张卡片等高，列表占满输入卡剩余高度（本身可滚动）。
+        self.lst.setMinimumHeight(120)
         self.lst.currentRowChanged.connect(self.on_select_preview)
         v.addWidget(self.lst)
         self.lbl_count = QLabel("未选择任何图片")
         self.lbl_count.setProperty("role", "hint")
         v.addWidget(self.lbl_count)
-
-        # ② 缺陷样本增强模式 + 生成图片数量 —— 同一行（中间留出间距）
-        # 缺陷样本增强模式：导入一张缺陷图 → 在预览上手绘大致区域 →
-        # 在该区域内随机生成多个、随机类型 / 位置 / 形状的缺陷（批量扩充训练样本）
-        self.cb_augment = QCheckBox("缺陷样本增强模式")
-        self.cb_augment.setToolTip(
-            "在左侧预览上手绘「大致区域」后勾选本项：\n"
-            "将按「生成图片数量」生成多张缺陷图（每张缺陷数由算法参数的「个数」决定），\n"
-            "缺陷类型/位置/形状随机；生成后在右列上方画廊点击缩略图可在下方查看大图。\n"
-            "未绘制区域时退化为整图随机生成。")
-        self.cb_augment.toggled.connect(self._on_augment_toggled)
-        ra = QHBoxLayout()
-        ra.setSpacing(6)
-        ra.addWidget(self.cb_augment)
-        ra.addSpacing(24)          # 与「生成图片数量」拉开距离
-        ra.addWidget(QLabel("生成图片数量"))
-        self.sp_aug_count = QSpinBox()
-        self.sp_aug_count.setRange(1, 100)
-        self.sp_aug_count.setValue(6)
-        self.sp_aug_count.setSuffix(" 张")
-        self.sp_aug_count.setEnabled(False)
-        self.sp_aug_count.setFixedWidth(96)
-        ra.addWidget(self.sp_aug_count)
-        ra.addStretch(1)
-        v.addLayout(ra)
         return gb_in
 
     # 上半部分卡片 3：输出设置
