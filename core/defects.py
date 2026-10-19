@@ -1584,19 +1584,24 @@ class PitDefect(BaseDefect):
             ny_ = -hy / nlen
             nz_ = 1.0 / nlen
             lam = clip01(nx_ * lx + ny_ * ly + nz_ * 0.88)      # 0..1
-            # 凹坑的关键：亮弧在「背光内壁」、坑底发暗成井、迎光内壁压暗 ——
-            # 与鼓包（亮弧在迎光侧 + 顶部镜面高光 + 背光侧接触阴影）正好镜像，
-            # 这样两者在方向光下读感相反，便于区分。
+            # 凹坑的关键线索（与鼓包镜像，便于区分）：
+            #  - 迎光内壁（lit_side）背光 → 压暗；
+            #  - 背光内壁（anti_side）受光 → 亮弧；
+            #  - 迎光侧坑口「亮唇」（边缘转入坑内处受光）—— 与光照方向无关的
+            #    稳定凹面线索，避免「中央暗块」被读成凸起的阴影核；
+            #  - 坑底只做极微弱的纵深变暗，不再画独立暗井（独立暗井无方向性、
+            #    会让某些光照方向把凹坑误读成鼓包）。
             proj = ((xx - cx) * lx + (yy - cy) * ly) / max(rad, 1e-6)
             lit_side = clip01(proj)      # 迎光侧权重
             anti_side = clip01(-proj)    # 背光侧权重（凹坑内壁受光处）
+            rim = clip01(1.0 - np.abs(d - 0.85) / 0.30)        # 坑口细环
             shade = 1.0
-            shade -= depth * 1.05 * (1.0 - lam)                        # 背光侧壁整体变暗
-            shade -= depth * 0.55 * lit_side * cap                     # 迎光内壁额外压暗
-            shade += hi_amt * 0.85 * anti_side * cap                   # 背光内壁亮弧（凹的关键）
-            shade -= depth * 0.45 * cap * (1.0 - clip01(d / 0.60))     # 坑底发暗成井
+            shade -= depth * 1.15 * lit_side * cap                     # 迎光内壁压暗
+            shade += hi_amt * 0.95 * anti_side * cap                   # 背光内壁亮弧（凹的关键）
+            shade += hi_amt * 0.45 * lit_side * rim                    # 迎光侧坑口亮唇
+            shade -= depth * 0.15 * cap * (1.0 - clip01(d / 0.55))     # 坑底微弱纵深
             shade = np.where(d < 1.0, shade, 1.0)                      # 坑外不受影响
-            shade = np.clip(shade, 0.30, 1.45)
+            shade = np.clip(shade, 0.35, 1.45)
 
             # ---- 轮廓掩膜：只在边缘环带加噪声，让坑口不规则但内部干净 ----
             n = fractal_noise((h, w), rng, base_cells=max(4, int(rad * 0.8)),
