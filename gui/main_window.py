@@ -200,6 +200,7 @@ class DefectPage(QWidget):
         self.rows: dict[str, SliderRow] = {}
         self.combos: dict[str, QComboBox] = {}
         self._items: list[QWidget] = []
+        self._note: Optional[QWidget] = None   # 缺陷专属调参提示（跨列放在参数之后）
         self._cols = 1
         self.color_rgb = (150, 130, 80)   # 异色自定义目标色（供 config() 统一输出）
 
@@ -311,6 +312,16 @@ class DefectPage(QWidget):
             self._add("lip", "迎光亮唇", 0.0, 1.5, cfg.get("lip", 0.45))
             self._add("light_deg", "光照方向", 0, 360,
                       cfg.get("light_deg", 135.0), step=1)
+            # 调参提示：凹坑在某些光照角度易被误读为凸起，给出推荐区间
+            note = QLabel(
+                "提示：若凹坑在某些光照角度下被误读为凸起，建议「中心暗井」调小"
+                "（0.05~0.0）、「迎光亮唇」调大（0.5~1.2）、光照方向取 20°~180°，"
+                "以强化凹面线索。")
+            note.setWordWrap(True)
+            note.setStyleSheet(
+                "color:#9aa4b2; background:#161b21; border:1px solid #2e353f; "
+                "border-radius:6px; padding:6px 8px; font-size:11px;")
+            self._note = note
         elif kind == "bump":
             self._add("strength", "强度", 0.0, 1.0, cfg.get("strength", 0.50))
             self._add("count", "鼓包数", 1, 5, cfg.get("count", 1), integer=True)
@@ -387,6 +398,11 @@ class DefectPage(QWidget):
             # 单列：参数行横跨两列（每列等宽，保证滑条不塌缩）
             for i, w in enumerate(self._items):
                 g.addWidget(w, r + i, 0, 1, 2)
+        # 缺陷专属调参提示（跨两列，放在所有参数之后）
+        if self._note is not None:
+            nrow = (r + (len(self._items) + 1) // 2) if cols == 2 \
+                else (r + len(self._items))
+            g.addWidget(self._note, nrow, 0, 1, 2)
         self.body.updateGeometry()
 
     def _labeled(self, label: str, w: QWidget) -> QWidget:
