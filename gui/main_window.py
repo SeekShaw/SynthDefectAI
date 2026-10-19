@@ -602,10 +602,6 @@ class ThumbnailGallery(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
-        cap = QLabel("增强样本缩略图")
-        cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cap.setProperty("role", "title")
-        lay.addWidget(cap)
 
         # 缺陷样本增强生成及数量设置：移动到画廊顶部
         self.cb_augment = QCheckBox("缺陷样本增强模式")
@@ -679,7 +675,7 @@ class ThumbnailGallery(QWidget):
             pm = np_to_qpixmap(img).scaled(
                 110, 110, Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation)
-            icon = QIcon(QPixmap.fromImage(pm))
+            icon = QIcon(pm)
             cap = captions[i] if captions else f"#{i + 1}"
             item = QListWidgetItem(icon, cap)
             item.setData(Qt.ItemDataRole.UserRole, i)

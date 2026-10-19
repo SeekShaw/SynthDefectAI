@@ -4,8 +4,8 @@
 # 保持一致：小版本累加第三位，满 10 进一位（1.0.10.0 → 1.1.0.0）。
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 1, 0),
-    prodvers=(1, 0, 1, 0),
+    filevers=(1, 0, 2, 0),
+    prodvers=(1, 0, 2, 0),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', 'ZY.Shaw'),
         StringStruct('FileDescription', '表面缺陷模拟生成工具'),
-        StringStruct('FileVersion', '1.0.1.0'),
+        StringStruct('FileVersion', '1.0.2.0'),
         StringStruct('InternalName', 'SynthDefectAI'),
         StringStruct('LegalCopyright', 'Copyright (C) 2026 ZY.Shaw'),
         StringStruct('OriginalFilename', 'SynthDefectAI.exe'),
         StringStruct('ProductName', 'SynthDefect AI'),
-        StringStruct('ProductVersion', '1.0.1.0'),
+        StringStruct('ProductVersion', '1.0.2.0'),
       ]),
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])]),
