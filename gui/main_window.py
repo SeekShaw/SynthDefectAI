@@ -798,6 +798,9 @@ class MainWindow(QMainWindow):
         self.defect_view = ImageView()
         self.defect_view.setStyleSheet(
             "background:#0e1013; border:1px solid #2e353f; border-radius:8px;")
+        # 缺陷放大图加入左侧三栏的缩放/平移联动组：
+        # 「＋ / － / 100%显示 / 适应窗口显示」按钮与滚轮缩放四方同步
+        self.preview.attach_view(self.defect_view)
         low = QWidget()
         lv = QVBoxLayout(low)
         lv.setContentsMargins(0, 0, 0, 0)
@@ -1654,7 +1657,7 @@ class MainWindow(QMainWindow):
                 img0, applied0 = results[0]
                 mid = self._aug_overlay(applied0)
                 self.preview.set_images(self.current_image, mid, img0)
-                self.defect_view.set_image(img0)
+                self.preview.set_extra_image(img0)
                 self.aug_selected = 0
                 kinds = " + ".join(
                     f"{KIND_CN.get(r.kind, r.kind)}"
@@ -1667,7 +1670,7 @@ class MainWindow(QMainWindow):
                     f" ｜ 平均每图{per / max(1, len(results)):.0f}个 ｜ seed={seed}")
             else:
                 self.preview.set_images(self.current_image, None, self.current_image)
-                self.defect_view.set_image(self.current_image)
+                self.preview.set_extra_image(self.current_image)
                 self.preview.set_info("增强模式未生成缺陷"
                                      "（区域可能过小或类型不可行，可换个区域）"
                                      f" ｜ seed={seed}")
@@ -1675,7 +1678,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.status.showMessage(f"增强预览错误：{e}")
             self.preview.set_images(self.current_image, None, self.current_image)
-            self.defect_view.set_image(self.current_image)
+            self.preview.set_extra_image(self.current_image)
             self.preview.set_info(f"增强预览出错：{e}")
         finally:
             self.progress.setRange(0, 100)
@@ -1691,7 +1694,7 @@ class MainWindow(QMainWindow):
         img, applied = results[idx]
         self.aug_selected = idx
         self.preview.views[2].set_image(img)
-        self.defect_view.set_image(img)
+        self.preview.set_extra_image(img)
         kinds = " + ".join(
             f"{KIND_CN.get(r.kind, r.kind)}"
             f"[{SEVERITY_CN.get(getattr(r, 'severity', 'mixed'), '?')}]"
@@ -1806,7 +1809,7 @@ class MainWindow(QMainWindow):
         comp = _compose_shifted(base, ox, oy)
         mid_s = _shift_arr(mid, ox, oy)
         self.preview.set_images(orig, mid_s, comp)
-        self.defect_view.set_image(comp)
+        self.preview.set_extra_image(comp)
         self.preview.set_info(
             f"缺陷位置偏移 x={ox:+d}px y={oy:+d}px（相对生成位置；"
             f"重新生成预览与「保存缺陷图」都会保留此偏移，"
@@ -1823,7 +1826,7 @@ class MainWindow(QMainWindow):
             mid = orig
         comp = np.clip(defect.astype(np.float32), 0, 255).astype(np.uint8)
         self.preview.set_images(orig, mid, comp)
-        self.defect_view.set_image(comp)
+        self.preview.set_extra_image(comp)
         self.preview.set_info(
             "缺陷位置已归零（回到自动生成的位置）；"
             "可用「←/→/↑/↓」重新微调，「保存缺陷图」始终保存当前预览效果")
@@ -1901,7 +1904,7 @@ class MainWindow(QMainWindow):
                 self._defect_shift_base = None
                 self.preview.set_images(self.current_image, seg_overlay,
                                         self.current_image)
-                self.defect_view.set_image(self.current_image)
+                self.preview.set_extra_image(self.current_image)
                 self.preview.set_info(msg)
                 self.status.showMessage(msg)
                 return
@@ -1969,13 +1972,13 @@ class MainWindow(QMainWindow):
                 mode_tag = ("产品轮廓内" if self._pos_mode() == POS_MODE_PRODUCT
                             else "图像坐标")
                 self.preview.set_images(self.current_image, mid, img)
-                self.defect_view.set_image(img)
+                self.preview.set_extra_image(img)
                 self.preview.set_info(
                     f"{kinds} ｜ 位置[{mode_tag}] ｜ 缺陷占比{cover:.2f}% ｜ 越界{leak:.2f}%"
                     f"{line_hint or self._hint_note()} ｜ seed={seed}")
             else:
                 self.preview.set_images(self.current_image, mid, img)
-                self.defect_view.set_image(img)
+                self.preview.set_extra_image(img)
                 why = ("（线条可能画在产品表面之外，已被区域约束剔除）"
                        if paths else "")
                 self.preview.set_info(f"未生成缺陷{why} ｜ seed={seed}")
@@ -1986,7 +1989,7 @@ class MainWindow(QMainWindow):
             # 出错时也保证三栏有图（而不是第三栏空白）
             self.preview.set_images(self.current_image, seg_overlay,
                                     self.current_image)
-            self.defect_view.set_image(self.current_image)
+            self.preview.set_extra_image(self.current_image)
             self.preview.set_info(f"预览出错：{e}")
         finally:
             self.progress.setRange(0, 100)  # 复位为批量模式的默认范围
@@ -2303,16 +2306,12 @@ class MainWindow(QMainWindow):
             self, f"关于 {APP_NAME}",
             f"<h3>{APP_NAME} "
             f"<span style='color:#98a2b3'>V{APP_VERSION}</span></h3>"
-            "<p>MLCC 表面缺陷合成工具：自动查找产品 → 约束缺陷落点 → "
-            "合成划痕 / 脏污 / 异色 / 缺角。</p>"
-            "<p>支持可旋转 ROI 手绘限定、划痕方向与颜色可调、"
-            "缺陷明显度分级、预览缩放平移。</p>"
             "<p>纯本地运行，无需联网、无需 GPU、无需大模型 API。</p>"
             "<hr>"
             f"<table cellpadding='2'>"
             f"<tr><td style='color:#98a2b3'>当前版本：</td>"
             f"<td>V{APP_VERSION}</td></tr>"
-            f"<tr><td style='color:#98a2b3'>作　　者：</td>"
+            f"<tr><td style='color:#98a2b3'>设计开发：</td>"
             f"<td>{APP_AUTHOR}</td></tr>"
             f"<tr><td style='color:#98a2b3'>发布日期：</td>"
             f"<td>{APP_RELEASE_DATE}</td></tr>"

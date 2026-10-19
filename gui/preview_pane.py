@@ -46,6 +46,8 @@ class PreviewPane(QWidget):
         self.views: List[ImageView] = []
         self.caps: List[QLabel] = []
         self._overlay_arr = None      # 最近一次的产品轮廓叠加层 (H,W,4)
+        # 联动的外部视图（如右侧「缺陷图放大」）：与三栏共享缩放/平移状态
+        self._extra_views: List[ImageView] = []
 
         lay.addLayout(self._build_bar())
 
@@ -465,11 +467,70 @@ class PreviewPane(QWidget):
         """手绘范围与产品区域固定取交集（已移除合并方式下拉）。"""
         return "intersect"
 
+    # ---------------- 联动的外部视图（右侧缺陷放大图） ----------------
+    def attach_view(self, view: ImageView):
+        """把外部视图加入缩放/平移联动组。
+
+        之后工具条的「＋ / － / 100%显示 / 适应窗口显示」按钮以及任意
+        一方的滚轮缩放、拖拽平移都会在全部视图间同步。
+        """
+        if view in self._extra_views or view in self.views:
+            return
+        self._extra_views.append(view)
+        view.zoomChanged.connect(self._on_zoom_changed)
+
+    def _all_views(self) -> List[ImageView]:
+        return self.views + self._extra_views
+
+    def set_extra_image(self, arr):
+        """更新联动外部视图的图像。
+
+        换图后视图内部可能自动「适应窗口」，这里用 _syncing 屏蔽其
+        zoomChanged，避免把左侧三栏的缩放状态也重置掉。
+        """
+        for v in self._extra_views:
+            self._syncing = True
+            try:
+                v.set_image(arr)
+            finally:
+                self._syncing = False
+
+    @staticmethod
+    def _sync_view_to(v: ImageView, src: ImageView):
+        """把源视图的缩放状态同步到目标视图（两者控件尺寸可以不同）。
+
+        - 「适应窗口」模式：各视图按自身控件尺寸重新适配（zoom 归 1.0）；
+        - 其它模式：以绝对显示比例（fit_scale×zoom）为准换算，保证
+          不同尺寸的视图放大倍数一致；
+        - 目标尚无图像时无法换算适配比例，直接复制源状态（连同
+          _fit_scale），待其有图后也能得到一致的显示比例。
+        """
+        v._fit_mode = src._fit_mode
+        if src._fit_mode:
+            v._zoom = 1.0
+            if v.has_image():
+                iw = max(v._img_size.width(), 1)
+                ih = max(v._img_size.height(), 1)
+                v._fit_scale = min(v.width() / iw, v.height() / ih)
+                s = v._fit_scale
+                v._offset = QPointF((v.width() - v._img_size.width() * s) / 2.0,
+                                    (v.height() - v._img_size.height() * s) / 2.0)
+            v.update()
+            return
+        if v.has_image():
+            src_scale = src._fit_scale * src._zoom
+            v._zoom = src_scale / max(v._fit_scale, 1e-6)
+        else:
+            v._zoom = src._zoom
+            v._fit_scale = src._fit_scale
+        v._offset = QPointF(src._offset)
+        v.update()
+
     def _on_zoom_changed(self, zoom: float):
-        """把源视图的缩放/平移同步到其余两栏。
+        """把源视图的缩放/平移同步到其余视图（含联动的外部视图）。
 
         注意：只在 **用户交互（滚轮/按钮/拖拽）** 时触发同步。
-        fit_all / zoom_1to1 这类「批量归一化」操作会一次性处理三栏，
+        fit_all / zoom_1to1 这类「批量归一化」操作会一次性处理全部视图，
         它们各自发出的 zoomChanged 不能再触发同步，否则会互相覆盖
         _fit_mode，导致「适应」被误标为「非适应」。
         """
@@ -477,21 +538,32 @@ class PreviewPane(QWidget):
             return
         self._syncing = True
         src = self.sender()
+        # 源是外部视图（控件尺寸与三栏不同）→ 三栏按绝对比例换算；
+        # 源是三栏之一 → 三栏之间沿用精确复制 zoom 的历史行为
+        cross = src in self._extra_views
         for v in self.views:
-            if v is not src:
+            if v is src:
+                continue
+            if cross:
+                self._sync_view_to(v, src)
+            else:
                 v._zoom = zoom
                 v._fit_mode = getattr(src, "_fit_mode", False)
-                if v._fit_mode:
-                    v._fit_scale = min(v.width() / max(v._img_size.width(), 1),
-                                       v.height() / max(v._img_size.height(), 1))
+                if v._fit_mode and v.has_image():
+                    iw = max(v._img_size.width(), 1)
+                    ih = max(v._img_size.height(), 1)
+                    v._fit_scale = min(v.width() / iw, v.height() / ih)
                 v._offset = QPointF(src._offset)
                 v.update()
+        for v in self._extra_views:
+            if v is not src:
+                self._sync_view_to(v, src)
         self._syncing = False
 
     def zoom_all(self, factor: float):
         self._syncing = True
         try:
-            for v in self.views:
+            for v in self._all_views():
                 v.zoom_by(factor)
         finally:
             self._syncing = False
@@ -500,7 +572,7 @@ class PreviewPane(QWidget):
     def fit_all(self):
         self._syncing = True
         try:
-            for v in self.views:
+            for v in self._all_views():
                 v.fit_to_window()
         finally:
             self._syncing = False
@@ -509,14 +581,19 @@ class PreviewPane(QWidget):
     def zoom_1to1(self):
         self._syncing = True
         try:
-            for v in self.views:
+            for v in self._all_views():
                 v.zoom_1to1()
         finally:
             self._syncing = False
         self._realign()
 
     def _realign(self):
-        """三栏按第一栏的缩放状态对齐（fit 模式下各栏自算适配比例）。"""
+        """三栏按第一栏的缩放状态对齐（fit 模式下各栏自算适配比例）。
+
+        只对齐三栏：批量操作（适应/100%/±）中外部联动视图已各自精确
+        处理（如 100% 时各自换算 1:1），若再按第一栏覆盖会引入
+        控件尺寸差异导致的比例误差。
+        """
         ref = self.views[0]
         for v in self.views[1:]:
             v._zoom = ref._zoom
