@@ -607,7 +607,7 @@ class ThumbnailGallery(QWidget):
         self.cb_augment = QCheckBox("缺陷样本增强模式")
         self.sp_aug_count = QSpinBox()
         self.sp_aug_count.setRange(1, 100)
-        self.sp_aug_count.setValue(6)
+        self.sp_aug_count.setValue(2)
         self.sp_aug_count.setSuffix(" 张")
         self.sp_aug_count.setEnabled(False)
         self.sp_aug_count.setFixedWidth(96)
@@ -631,11 +631,12 @@ class ThumbnailGallery(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.list.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.list.setIconSize(QSize(96, 96))
-        self.list.setGridSize(QSize(108, 134))
-        self.list.setSpacing(8)
+        # 缩略图缩小：单行横向排列，一行最多约 10 个，超出走横向滚动条
+        self.list.setIconSize(QSize(32, 32))
+        self.list.setGridSize(QSize(38, 54))
+        self.list.setSpacing(4)
         self.list.setWordWrap(True)
-        self.list.setMaximumHeight(150)
+        self.list.setMaximumHeight(62)
         self.list.setStyleSheet(
             "QListWidget{background:#0e1013; border:1px solid #2e353f; "
             "border-radius:6px;}"
