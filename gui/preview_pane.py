@@ -33,6 +33,7 @@ class PreviewPane(QWidget):
     posModeChanged = pyqtSignal(str)        # 缺陷位置方式变化
     overlayChanged = pyqtSignal()           # 轮廓颜色/线宽/显隐变化
     defectMove = pyqtSignal(int, int)       # 缺陷位置微调 (dx, dy) 像素
+    defectReset = pyqtSignal()              # 缺陷位置归零（回到自动生成位置）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -322,7 +323,8 @@ class PreviewPane(QWidget):
         t_mv.setProperty("role", "title")
         t_mv.setToolTip("把最近一次生成的缺陷整体平移（单位：像素 px）。\n"
                         "单击一次移动 1px。\n"
-                        "偏移会同步应用到「保存缺陷图」。")
+                        "偏移会同步应用到「保存缺陷图」，重新生成预览后仍保留；\n"
+                        "点「位置归零」或切换图片时才清零。")
         bar.addWidget(t_mv)
         self.btn_move = {}
         _dirs = (("←", "左", -1, 0), ("→", "右", 1, 0),
@@ -334,6 +336,15 @@ class PreviewPane(QWidget):
             b.clicked.connect(lambda _=False, d=dx, e=dy: self.defectMove.emit(d, e))
             self.btn_move[(dx, dy)] = b
             bar.addWidget(b)
+        # 「位置归零」：撤销全部微调，缺陷回到自动生成的位置。
+        # 偏移在重新生成预览/保存时始终保留，只有换图或点此按钮才清零。
+        self.btn_move_reset = QPushButton("位置归零")
+        self.btn_move_reset.setToolTip(
+            "撤销缺陷位置微调，回到自动生成的位置。\n"
+            "微调偏移在重新生成预览与保存时都会保留；\n"
+            "只有切换图片或点本按钮才会清零。")
+        self.btn_move_reset.clicked.connect(self.defectReset.emit)
+        bar.addWidget(self.btn_move_reset)
         bar.addStretch(1)     # 行尾弹性：让微调按钮组紧跟「＋」而不是被撑到行尾
         return bar
 

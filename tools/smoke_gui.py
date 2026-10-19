@@ -1159,18 +1159,24 @@ def main() -> int:
     # 位置微调按钮不带自动重复（按住连移会卡，已按需求关闭：单击一次移动 1px）
     for _b in ("←", "→", "↑", "↓"):
         check(not btns[_b].autoRepeat(), f"「{_b}」已关闭按住连移（无 autoRepeat）")
-    # 防抖自动重生成（reset_offset=False）应**保留**微调偏移，
-    # 不会把刚微调好的位置冲掉（这正是「移动后保存是移位前」bug 的根因）
+    # 防抖自动重生成应**保留**微调偏移，不会把刚微调好的位置冲掉
+    # （这正是「移动后保存是移位前」bug 的根因）
     win._preview_timer.stop()
     win.refresh_preview()
     app.processEvents()
     check(win._defect_offset == (-1, 2),
           f"自动重生成后偏移保留（{win._defect_offset}）")
-    # 用户主动点「缺陷生成预览」(reset_offset=True) 才清零（文档约定「重新生成预览后归零」）
+    # 用户主动点「缺陷生成预览」也**保留**偏移（所见即所存）：
+    # 偏移只有切换图片或点「位置归零」才清零
     win.btn_preview.click()
     app.processEvents()
+    check(win._defect_offset == (-1, 2),
+          f"点「缺陷生成预览」后偏移仍保留（{win._defect_offset}）")
+    # 「位置归零」按钮：撤销全部微调，回到自动生成位置
+    pv.btn_move_reset.click()
+    app.processEvents()
     check(win._defect_offset == (0, 0),
-          "点「缺陷生成预览」后偏移归零（手动重生成）")
+          f"点「位置归零」后偏移清零（{win._defect_offset}）")
 
     off0 = QPointF(v._offset)
     v._panning = True
@@ -1321,14 +1327,14 @@ def main() -> int:
         check("seed" in os.path.basename(pngs[0]),
               "文件名带 seed 便于区分多次保存")
 
-    # ================= 回归：移动缺陷后再被防抖重生成，保存仍需反映位移 =================
+    # ================= 回归：移动缺陷后保存，必须反映位移（多操作序列） =================
     # 复现并锁定「生成的缺陷移动位置后，保存的图片是移位之前」的 bug：
-    # 微调后若恰好触发防抖定时器(参数微调/区域重算)调用 refresh_preview，
-    # 旧逻辑会把偏移清零，导致保存回到移位前。修复后偏移应保留并同步到保存结果。
+    # 旧逻辑在防抖重生成 / 手动重生成时都会把偏移清零；修复后偏移始终保留，
+    # 只有切换图片或点「位置归零」才清零 —— 任何操作顺序下保存的都是调整后的图。
     win._preview_timer.stop()
-    win.btn_preview.click()          # 主动重生成并归零偏移
+    pv.btn_move_reset.click()        # 「位置归零」作为基线
     app.processEvents()
-    check(win._defect_offset == (0, 0), "回归基线：手动重生成后偏移归零")
+    check(win._defect_offset == (0, 0), "回归基线：「位置归零」后偏移为 0")
     btns["↓"].click()
     btns["↓"].click()
     btns["↓"].click()
@@ -1336,18 +1342,47 @@ def main() -> int:
     app.processEvents()
     check(win._defect_offset == (0, 4),
           f"回归：点 4 次↓ 偏移累计到 (0,4)（{win._defect_offset}）")
+    # 场景A（用户实际操作）：调整后**直接保存**（不点生成预览）
     _base_img = win._defect_shift_base[1] if win._defect_shift_base else None
-    win.schedule_preview()           # 模拟用户微调参数 -> 防抖定时器
-    QTest.qWait(350)                 # 等定时器触发 refresh_preview
-    app.processEvents()
-    check(win._defect_offset == (0, 4),
-          f"回归：防抖重生成后偏移仍保留（{win._defect_offset}）")
     out_race = os.path.join(HERE, "build", "out_repro_race")
     if os.path.isdir(out_race):
         for f in glob.glob(os.path.join(out_race, "*.png")):
             os.remove(f)
     win.ed_out.setText(out_race)
     _oi2 = _QMB.information
+    _QMB.information = staticmethod(lambda *a, **k: _QMB.StandardButton.Ok)
+    try:
+        win.btn_save.click()
+        app.processEvents()
+        rp = sorted(glob.glob(os.path.join(out_race, "*.png")))
+        _ok_a = False
+        if rp and _base_img is not None:
+            from core.utils import imread as _imread2
+            _sv = _imread2(rp[0])
+            _exp = np.clip(_shift_arr(_base_img.astype(np.float32), 0, 4),
+                           0, 255).astype(np.uint8)
+            _md = float(np.abs(_sv.astype(np.float32) - _exp.astype(np.float32)).max())
+            _ok_a = _md < 1.0
+            check(_ok_a, f"回归：调整后直接保存=移动后预览（最大差 {_md:.2f}）")
+        else:
+            check(False, "回归：调整后直接保存应产生文件")
+    finally:
+        _QMB.information = _oi2
+    # 场景B：调整 → 点「缺陷生成预览」→ 保存（重生成也必须保留偏移）
+    win._preview_timer.stop()
+    win.btn_preview.click()
+    app.processEvents()
+    check(win._defect_offset == (0, 4),
+          f"回归：重生成预览后偏移仍保留（{win._defect_offset}）")
+    _base_img = win._defect_shift_base[1] if win._defect_shift_base else None
+    win.schedule_preview()           # 模拟用户微调参数 -> 防抖定时器
+    QTest.qWait(350)                 # 等定时器触发 refresh_preview
+    app.processEvents()
+    check(win._defect_offset == (0, 4),
+          f"回归：防抖重生成后偏移仍保留（{win._defect_offset}）")
+    if os.path.isdir(out_race):
+        for f in glob.glob(os.path.join(out_race, "*.png")):
+            os.remove(f)
     _QMB.information = staticmethod(lambda *a, **k: _QMB.StandardButton.Ok)
     try:
         win.btn_save.click()

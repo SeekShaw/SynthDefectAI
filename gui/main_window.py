@@ -740,6 +740,7 @@ class MainWindow(QMainWindow):
             self.preview.pos_mode() == POS_MODE_PRODUCT)
         self.preview.overlayChanged.connect(self._refresh_overlay)
         self.preview.defectMove.connect(self._shift_defect)
+        self.preview.defectReset.connect(self._reset_defect_offset)
         # 区域归属：区域画在哪个缺陷页就归哪个类型；各类型区域数量=其「生成数量」
         for _v in self.preview.views:
             _v.kind_provider = self.current_defect_kind
@@ -801,9 +802,8 @@ class MainWindow(QMainWindow):
         self.btn_preview.setProperty("accent", True)
         self.btn_preview.setMinimumHeight(36)
         self.btn_preview.setMinimumWidth(140)
-        self.btn_preview.setToolTip("按当前参数生成一次缺陷预览")
-        self.btn_preview.clicked.connect(
-            lambda: self.refresh_preview(reset_offset=True))
+        self.btn_preview.setToolTip("按当前参数生成一次缺陷预览（已微调的缺陷位置会保留）")
+        self.btn_preview.clicked.connect(self.refresh_preview)
         bl.addWidget(self.btn_preview)
         self.btn_save = QPushButton("保存缺陷图")
         self.btn_save.setProperty("accent", True)
@@ -1799,23 +1799,38 @@ class MainWindow(QMainWindow):
         self.preview.set_images(orig, mid_s, comp)
         self.defect_view.set_image(comp)
         self.preview.set_info(
-            f"缺陷位置偏移 x={ox:+d}px y={oy:+d}px（相对生成位置，"
-            f"「保存缺陷图」同样生效；重新生成预览后归零）")
+            f"缺陷位置偏移 x={ox:+d}px y={oy:+d}px（相对生成位置；"
+            f"重新生成预览与「保存缺陷图」都会保留此偏移，"
+            f"点「位置归零」或切换图片时清零）")
 
-    def refresh_preview(self, reset_offset: bool = False):
+    def _reset_defect_offset(self):
+        """「位置归零」按钮：撤销全部位置微调，缺陷回到自动生成的位置。"""
+        if self._defect_shift_base is None or self.current_image is None:
+            self._defect_offset = (0, 0)
+            return
+        orig, defect, mid, mask = self._defect_shift_base
+        self._defect_offset = (0, 0)
+        if mid is None:
+            mid = orig
+        comp = np.clip(defect.astype(np.float32), 0, 255).astype(np.uint8)
+        self.preview.set_images(orig, mid, comp)
+        self.defect_view.set_image(comp)
+        self.preview.set_info(
+            "缺陷位置已归零（回到自动生成的位置）；"
+            "可用「←/→/↑/↓」重新微调，「保存缺陷图」始终保存当前预览效果")
+
+    def refresh_preview(self):
         """重新生成缺陷预览。
 
-        reset_offset=True 表示用户**主动点「缺陷生成预览」**：此时把「缺陷位置微调」
-        的累计偏移清零（文档约定「重新生成预览后归零」）。
-        reset_offset=False（防抖定时器 / 参数微调触发的自动重生成）则**保留**偏移，
-        并把当前累计偏移同步应用到本次预览，避免刚微调好的位置被自动重生成冲掉。
+        「缺陷位置微调」的累计偏移在重生成时**始终保留**并同步应用到本次预览
+        （无论手动点「缺陷生成预览」还是参数微调触发的自动重生成），
+        保证「所见即所存」——点「保存缺陷图」得到的总是调整后的位置。
+        偏移只在「切换图片」或点「位置归零」按钮时清零。
         """
         if self.current_image is None:
             self.preview.set_images(None, None, None)
             self.preview.set_info("—")
             return
-        if reset_offset:
-            self._defect_offset = (0, 0)
         # 用户可能画完线还没双击/回车结束就先点了刷新 —— 这里帮他提交
         self.preview.commit_pending()
         # 产品轮廓 / 限定范围叠加层：「按图像坐标位置」不执行产品轮廓检测
@@ -2314,7 +2329,9 @@ HELP_HTML = """\
 <table cellpadding="1" cellspacing="0">
 <tr><td valign="top">　· <b>按图像坐标位置</b>（默认）：</td>
 <td>想在图像哪个位置生成缺陷，就把绘制区域画在哪；<b>不执行产品轮廓检测</b>。<br>
-　　微调位置：点击 <b>上移 / 下移 / 左移 / 右移</b> 按钮，每点击一次移动 <span class="kw">1 个像素</span>。</td></tr>
+　　微调位置：点击 <b>左移 / 右移 / 上移 / 下移</b> 按钮，每点击一次移动 <span class="kw">1 个像素</span>；<br>
+　　偏移<b>始终保留</b>——重新生成预览、调参数都不会冲掉，保存的一定是调整后的位置；<br>
+　　点「<span class="kw">位置归零</span>」或切换图片时清零。</td></tr>
 <tr><td valign="top">　· <b>限定在产品轮廓内</b>：</td>
 <td>此模式下才执行<b>产品轮廓检测并显示</b>（「显示产品轮廓」等控件仅在此时可用）。<br>
 　　缺陷只生成在<b>产品轮廓 ∩ 绘制区域</b>的交集内；若绘制的区域（矩形/画笔/线条）<br>
