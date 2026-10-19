@@ -1124,7 +1124,8 @@ def main() -> int:
     check(abs(v._scale() - 1.0) < 1e-3, f"1:1 后缩放为 1.0（{v._scale():.4f}）")
 
     # ================= 需求：缺陷位置像素级微调 =================
-    from gui.main_window import _shift_arr, POS_MODE_PIXEL, POS_MODE_PRODUCT
+    from gui.main_window import (_shift_arr, _compose_shifted,
+                                 POS_MODE_PIXEL, POS_MODE_PRODUCT)
     _a = np.arange(12, dtype=np.float32).reshape(3, 4)
     _s = _shift_arr(_a, 1, 0)
     check(_s[0, 1] == _a[0, 0] and _s[0, 0] == 0 and _s[2, 3] == _a[2, 2],
@@ -1359,8 +1360,9 @@ def main() -> int:
         if rp and _base_img is not None:
             from core.utils import imread as _imread2
             _sv = _imread2(rp[0])
-            _exp = np.clip(_shift_arr(_base_img.astype(np.float32), 0, 4),
-                           0, 255).astype(np.uint8)
+            # 期望值 = 「背景不动、只移缺陷」合成（与微调按钮预览一致）；
+            # 不能用整图平移当期望——那是「存的是调整前」的根因
+            _exp = _compose_shifted(win._defect_shift_base, 0, 4)
             _md = float(np.abs(_sv.astype(np.float32) - _exp.astype(np.float32)).max())
             _ok_a = _md < 1.0
             check(_ok_a, f"回归：调整后直接保存=移动后预览（最大差 {_md:.2f}）")
@@ -1394,8 +1396,7 @@ def main() -> int:
         from core.utils import imread as _imread2
         _sv = _imread2(rp[0])
         ox, oy = win._defect_offset
-        _exp = np.clip(_shift_arr(_base_img.astype(np.float32), ox, oy),
-                       0, 255).astype(np.uint8)
+        _exp = _compose_shifted(win._defect_shift_base, ox, oy)
         _md = float(np.abs(_sv.astype(np.float32) - _exp.astype(np.float32)).max())
         check(_md < 1.0,
               f"回归：保存图=移动后预览（最大差 {_md:.2f}，偏移 {win._defect_offset}）")

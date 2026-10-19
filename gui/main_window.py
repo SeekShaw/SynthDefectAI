@@ -43,6 +43,22 @@ def _shift_arr(a: np.ndarray, dx: int, dy: int) -> np.ndarray:
         r[ys:ye, xs:xe] = a[ys - dy:ye - dy, xs - dx:xe - dx]
     return r
 
+
+def _compose_shifted(base, ox: int, oy: int) -> np.ndarray:
+    """按「背景不动、只有缺陷平移」合成偏移后的缺陷图。
+
+    base = (原图, 缺陷图, 叠加图, 联合掩膜)（_defect_shift_base 的内容）。
+    用 `原图×(1-掩膜平移) + 缺陷图平移×掩膜平移` 重新合成：
+    缺陷相对产品/背景移动 (ox, oy) 像素，背景保持原位 ——
+    与微调按钮的实时预览完全一致。**不能**用整图平移代替：
+    整图平移会把背景一起挪，缺陷相对产品的位置根本没变。
+    """
+    orig, defect, _mid, mask = base
+    mask_s = _shift_arr(mask, ox, oy)
+    comp = (orig.astype(np.float32) * (1.0 - mask_s[:, :, None])
+            + _shift_arr(defect.astype(np.float32), ox, oy) * mask_s[:, :, None])
+    return np.clip(comp, 0, 255).astype(np.uint8)
+
 # 异色「色调」下拉选项（随机 / 预设 / 自定义）
 DISCOLOR_COLOR_OPTS = [
     ("随机", "random"), ("泛黄", "yellow"), ("泛蓝", "blue"), ("泛绿", "green"),
@@ -1791,10 +1807,7 @@ class MainWindow(QMainWindow):
         self._defect_offset = (ox, oy)
         if mid is None:
             mid = orig
-        mask_s = _shift_arr(mask, ox, oy)
-        comp = (orig.astype(np.float32) * (1.0 - mask_s[:, :, None])
-                + _shift_arr(defect.astype(np.float32), ox, oy) * mask_s[:, :, None])
-        comp = np.clip(comp, 0, 255).astype(np.uint8)
+        comp = _compose_shifted(base, ox, oy)
         mid_s = _shift_arr(mid, ox, oy)
         self.preview.set_images(orig, mid_s, comp)
         self.defect_view.set_image(comp)
@@ -1923,12 +1936,17 @@ class MainWindow(QMainWindow):
                 self._defect_shift_base = None
 
             if applied:
-                # 把累计微调偏移同步到本次预览显示与统计信息
+                # 把累计微调偏移同步到本次预览显示与统计信息。
+                # 注意：必须用「背景不动、只移缺陷」的合成（与微调按钮一致），
+                # 不能整图平移——整图平移会连背景一起挪，
+                # 缺陷相对产品的位置实际没变（这正是「存的是调整前」的根因）。
                 if ox or oy:
-                    img = np.clip(_shift_arr(img.astype(np.float32), ox, oy),
-                                  0, 255).astype(np.uint8)
-                    mid = np.clip(_shift_arr(mid.astype(np.float32), ox, oy),
-                                  0, 255).astype(np.uint8)
+                    img = _compose_shifted(self._defect_shift_base, ox, oy)
+                    m_s = _shift_arr(mask_all, ox, oy)
+                    mid = (mid.astype(np.float32) * (1.0 - m_s[:, :, None])
+                           + _shift_arr(mid.astype(np.float32), ox, oy)
+                           * m_s[:, :, None])
+                    mid = np.clip(mid, 0, 255).astype(np.uint8)
                     for r in applied:
                         r.mask = _shift_arr(r.mask, ox, oy)
                     mask_all = clip01(sum(clip01(r.mask) for r in applied))
@@ -2025,11 +2043,13 @@ class MainWindow(QMainWindow):
                                          scratch_paths=paths,
                                          region_masks_by_kind=self._region_masks_by_kind(seg),
                                          product_region=product_region)
-            # 与预览保持一致：把「缺陷位置微调」的累计偏移同样应用到保存结果
+            # 与预览保持一致：把「缺陷位置微调」的累计偏移同样应用到保存结果。
+            # 必须用「背景不动、只移缺陷」的合成（与微调按钮/预览完全一致）；
+            # 之前用整图平移会把背景一起挪，缺陷相对产品的位置实际没变，
+            # 用户看到的就是「调整前的图」。
             _ox, _oy = getattr(self, "_defect_offset", (0, 0))
             if (_ox or _oy) and applied and getattr(self, "_defect_shift_base", None):
-                img = np.clip(_shift_arr(img.astype(np.float32), _ox, _oy),
-                              0, 255).astype(np.uint8)
+                img = _compose_shifted(self._defect_shift_base, _ox, _oy)
                 for r in applied:
                     r.mask = _shift_arr(r.mask, _ox, _oy)
             if not applied:
@@ -2042,9 +2062,14 @@ class MainWindow(QMainWindow):
             base = os.path.splitext(os.path.basename(self.current_path))[0] \
                 if self.current_path else "defect"
             os.makedirs(out, exist_ok=True)
-            # 文件名带缺陷类型与 seed，便于区分多次保存
+            # 文件名带缺陷类型与 seed，便于区分多次保存；
+            # 若做过「缺陷位置微调」，文件名追加 _off 标记——
+            # 既方便辨认这张图是调整后的版本，也避免与同 seed 的旧文件混淆
             kinds = "_".join(sorted({r.kind for r in applied}))
-            name = f"{base}_{kinds}_seed{seed}.png"
+            _ox_tag, _oy_tag = getattr(self, "_defect_offset", (0, 0))
+            off_tag = (f"_off{_ox_tag:+d}{_oy_tag:+d}"
+                       if (_ox_tag or _oy_tag) else "")
+            name = f"{base}_{kinds}_seed{seed}{off_tag}.png"
             dst = os.path.join(out, name)
             imwrite(dst, img)
             # 可选产物
