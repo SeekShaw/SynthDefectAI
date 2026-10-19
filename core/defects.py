@@ -1584,13 +1584,19 @@ class PitDefect(BaseDefect):
             ny_ = -hy / nlen
             nz_ = 1.0 / nlen
             lam = clip01(nx_ * lx + ny_ * ly + nz_ * 0.88)      # 0..1
-            # 凹坑只要「一侧亮弧 + 一侧暗弧」这一条信息。
-            # 不要再叠加独立的 rimband 高光环 —— 它与镜面高光弧位置接近，
-            # 两条弧叠在一起会形成「逗号/波浪」状的假纹。
-            shade = 1.0 - depth * (1.0 - lam) * 1.20             # 背光侧变暗
-            shade = shade + hi_amt * 0.26 * np.power(clip01(lam), 6.0)   # 单一亮弧
-            shade = np.where(d < 1.0, shade, 1.0)                # 坑外不受影响
-            shade = np.clip(shade, 0.35, 1.55)
+            # 凹坑的关键：亮弧在「背光内壁」、坑底发暗成井、迎光内壁压暗 ——
+            # 与鼓包（亮弧在迎光侧 + 顶部镜面高光 + 背光侧接触阴影）正好镜像，
+            # 这样两者在方向光下读感相反，便于区分。
+            proj = ((xx - cx) * lx + (yy - cy) * ly) / max(rad, 1e-6)
+            lit_side = clip01(proj)      # 迎光侧权重
+            anti_side = clip01(-proj)    # 背光侧权重（凹坑内壁受光处）
+            shade = 1.0
+            shade -= depth * 1.05 * (1.0 - lam)                        # 背光侧壁整体变暗
+            shade -= depth * 0.55 * lit_side * cap                     # 迎光内壁额外压暗
+            shade += hi_amt * 0.85 * anti_side * cap                   # 背光内壁亮弧（凹的关键）
+            shade -= depth * 0.45 * cap * (1.0 - clip01(d / 0.60))     # 坑底发暗成井
+            shade = np.where(d < 1.0, shade, 1.0)                      # 坑外不受影响
+            shade = np.clip(shade, 0.30, 1.45)
 
             # ---- 轮廓掩膜：只在边缘环带加噪声，让坑口不规则但内部干净 ----
             n = fractal_noise((h, w), rng, base_cells=max(4, int(rad * 0.8)),
@@ -1821,10 +1827,24 @@ class BumpDefect(BaseDefect):
             ny_ = -hy / nlen
             nz_ = 1.0 / nlen
             lam = clip01(nx_ * lx + ny_ * ly + nz_ * 0.88)
-            # 迎光侧亮、背光侧暗 + 顶部柔和高光（单一信息，不做多余环带）
-            shade = 1.0 - height_amt * 0.35 * (1.0 - lam)
-            shade = shade + gloss * 0.30 * np.power(clip01(lam), 5.0)
-            shade = np.clip(np.where(d < 1.15, shade, 1.0), 0.55, 1.5)
+            proj = ((xx - cx) * lx + (yy - cy) * ly) / max(rad, 1e-6)
+            lit_side = clip01(proj)      # 迎光侧权重
+            anti_side = clip01(-proj)    # 背光侧权重
+            # 凸：迎光侧受光 + 顶部镜面热点（凸的关键）+ 背光侧接触阴影。
+            # 亮弧方向刻意与凹坑相反（迎光侧），使两者在方向光下读感镜像。
+            shade = 1.0
+            shade += height_amt * 0.20 * lam                                # 整体受光抬亮
+            shade += height_amt * 0.30 * lit_side * cap                     # 迎光侧亮弧（与凹坑镜像）
+            shade += gloss * 0.80 * np.power(lit_side, 3.0) * cap           # 顶部镜面热点
+            shade = np.clip(np.where(d < 1.15, shade, 1.0), 0.55, 1.6)
+            # 接触阴影：抗光侧、紧贴鼓包外的一圈环带（d∈[1.0,1.55]），
+            # 制造「凸起投在台面上」的读感；必须限制径向范围，
+            # 否则 proj/d 在整幅图上无界会把阴影铺满全图。
+            ring_out = clip01((1.55 - d) / 0.55)
+            contact = (np.power(anti_side, 1.5)
+                       * _smoothstep((d - 1.0) / 0.45) * ring_out
+                       * height_amt * 0.6)
+            out = clip01(out * (1.0 - contact[:, :, None] * 0.8 * clip01(reg)[:, :, None]))
 
             # ---- 轮廓：只在边缘环带加噪声，鼓包内部高度场保持光滑 ----
             n = fractal_noise((h, w), rng, base_cells=max(4, int(rad * 0.8)),
