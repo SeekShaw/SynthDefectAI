@@ -307,6 +307,8 @@ class DefectPage(QWidget):
             self._add("size_ratio", "凹坑大小", 0.003, 0.08, cfg.get("size_ratio", 0.011))
             self._add("depth", "凹陷深度", 0.05, 1.0, cfg.get("depth", 0.55))
             self._add("highlight", "坑内高光", 0.0, 1.5, cfg.get("highlight", 0.55))
+            self._add("well", "中心暗井", 0.0, 0.6, cfg.get("well", 0.15))
+            self._add("lip", "迎光亮唇", 0.0, 1.5, cfg.get("lip", 0.45))
             self._add("light_deg", "光照方向", 0, 360,
                       cfg.get("light_deg", 135.0), step=1)
         elif kind == "bump":

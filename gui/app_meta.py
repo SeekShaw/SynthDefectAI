@@ -8,6 +8,6 @@
 APP_NAME = "SynthDefect AI"
 # 窗口标题（用户指定文案）
 APP_TITLE = "SynthDefect  AI —表面缺陷模拟生成工具"
-APP_VERSION = "1.0.6.0"
+APP_VERSION = "1.0.7.0"
 APP_AUTHOR = "ZY.Shaw"
 APP_RELEASE_DATE = "2026-10-19"

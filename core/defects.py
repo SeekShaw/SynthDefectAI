@@ -1516,6 +1516,8 @@ class PitParams:
     depth: float = 0.55            # 凹陷深度（影响明暗对比）
     highlight: float = 0.55        # 坑内高光强度
     light_deg: float = 135.0       # 光照方向（度，0=从右）
+    well: float = 0.15             # 中心暗井强度（与光照方向无关；越大越像「暗块/凸起阴影核」）
+    lip: float = 0.45              # 迎光侧坑口亮唇强度（与光照方向无关的凹面线索，越大越像「凹坑」）
 
 
 class PitDefect(BaseDefect):
@@ -1549,6 +1551,8 @@ class PitDefect(BaseDefect):
         size_ratio = float(self.params.get("size_ratio", 0.011)) * (0.5 + 0.9 * s) * (0.6 + 0.5 * sv)
         depth = float(np.clip(self.params.get("depth", 0.55), 0.05, 1.0))
         hi_amt = float(np.clip(self.params.get("highlight", 0.55), 0.0, 1.5))
+        well = float(np.clip(self.params.get("well", 0.15), 0.0, 0.6))
+        lip = float(np.clip(self.params.get("lip", 0.45), 0.0, 1.5))
         light_deg = float(self.params.get("light_deg", 135.0))
         th = math.radians(light_deg)
         lx, ly = math.cos(th), math.sin(th)      # 光照方向（图像坐标，y 向下）
@@ -1598,8 +1602,8 @@ class PitDefect(BaseDefect):
             shade = 1.0
             shade -= depth * 1.15 * lit_side * cap                     # 迎光内壁压暗
             shade += hi_amt * 0.95 * anti_side * cap                   # 背光内壁亮弧（凹的关键）
-            shade += hi_amt * 0.45 * lit_side * rim                    # 迎光侧坑口亮唇
-            shade -= depth * 0.15 * cap * (1.0 - clip01(d / 0.55))     # 坑底微弱纵深
+            shade += hi_amt * lip * lit_side * rim                      # 迎光侧坑口亮唇
+            shade -= depth * well * cap * (1.0 - clip01(d / 0.55))     # 坑底微弱纵深（中心暗井）
             shade = np.where(d < 1.0, shade, 1.0)                      # 坑外不受影响
             shade = np.clip(shade, 0.35, 1.45)
 
