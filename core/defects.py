@@ -1064,7 +1064,7 @@ class ChipDefect(BaseDefect):
             * (0.5 + 0.7 * s) * (0.6 + 0.4 * sv)
         corner_bias = float(np.clip(self.params.get("corner_bias", 0.35), 0.0, 1.0))
         edge_soft = float(np.clip(self.params.get("edge_soft", 0.45), 0.0, 1.0))
-        color_match = float(np.clip(self.params.get("color_match", 0.65), 0.0, 1.0))
+        color_match = float(np.clip(self.params.get("color_match", 0.85), 0.0, 1.0))
 
         mask = np.zeros((h, w), dtype=np.float32)
         out = base.copy()
@@ -1130,18 +1130,15 @@ class ChipDefect(BaseDefect):
             used.append((cx, cy, half))
             n_made += 1
 
-            # ---- 断面材质：颜色与邻近区域接近 + 粗糙颗粒感 ----
+            # ---- 断面材质：与邻近区域同材质（真实崩缺露出同一块材料），
+            #     仅叠加细微颗粒起伏；不再叠加偏灰褐的色调与「亮斑/暗块」，
+            #     避免被误读成异物 / 赃污 ----
             solid = (bite > 0.5).astype(np.uint8)
             depth_w = clip01(1.0 - dd / max(float(np.percentile(reach, 99.0)), 1e-6))
-            lum = out.mean(axis=2, keepdims=True)
             grain_amt = float(self.params.get("grain", 0.45)) * (0.4 + 0.7 * s) * (0.4 + 0.6 * sv)
             grain = fractal_noise((h, w), rng, base_cells=max(6, int(half * 1.1)),
                                   octaves=4, persistence=0.62)
-            # 模型A（旧）：断口比原表面略亮（+3%~11%），靠粗糙感与暗边区分
-            frac_old = clip01(lum * rng.uniform(1.03, 1.11)
-                              + (grain - 0.5)[:, :, None] * grain_amt * 0.45)
-            # 模型B（新）：取崩口周围环带的平均色 → 断面颜色与邻近区域几乎
-            # 一致（真实崩缺露出的是同一块材料），只保留轻微颗粒起伏
+            # 取崩口周围环带的平均色 → 断面颜色与邻近区域几乎一致
             r2 = max(3, int(half * 0.6))
             near = (cv2.dilate(solid, np.ones((2 * r2 + 1, 2 * r2 + 1), np.uint8)) > 0)
             sel = near & (reg > 0.5) & (bite <= 0.05)
@@ -1151,16 +1148,20 @@ class ChipDefect(BaseDefect):
                 surr = base[reg > 0.5].mean(axis=0)
             else:
                 surr = np.array([0.7, 0.7, 0.7], np.float32)
-            frac_near = clip01(surr[None, None, :]
-                               + (grain - 0.5)[:, :, None] * grain_amt * 0.30)
-            # 「颜色接近度」在两个模型间插值：1=完全跟随邻近区域颜色
-            fracture = clip01(frac_old * (1.0 - color_match) + frac_near * color_match)
+            # 断口 = 邻近色 + 与周边一致的细微颗粒（不再叠加灰褐色调）
+            frac_tex = clip01(surr[None, None, :]
+                              + (grain - 0.5)[:, :, None] * grain_amt * 0.30)
+            # 「颜色接近度」：在「带颗粒纹理」与「平铺邻近色」间插值，
+            # 越大越贴合周边、异色感越弱（默认强烈跟随周边）
+            frac = clip01(frac_tex * color_match
+                          + clip01(surr[None, None, :]) * (1.0 - color_match))
+            # 断口内壁（最深处）仅做薄薄一层凹陷阴影，而非整块压暗，
+            # 读感是「被啃掉一块的破损边」，不是「脏污斑点」
             dark = float(self.params.get("darkness", 0.32)) * (0.4 + 0.8 * s) * (0.4 + 0.6 * sv)
-            fracture = clip01(fracture - dark * depth_w[:, :, None] * 0.34)
-            # 露出未烧结体，断面略偏灰褐
-            fracture = clip01(fracture * np.array([1.012, 0.996, 0.962], np.float32)[None, None, :])
+            concave = np.power(depth_w, 2.0) * dark * 0.20
+            frac = clip01(frac * (1.0 - concave[:, :, None]))
             a_chip = bite[:, :, None]
-            out = out * (1 - a_chip) + fracture * a_chip
+            out = out * (1 - a_chip) + frac * a_chip
 
             # ---- 交界暗边：原轮廓线内侧一圈暗线（崩落后的阴影） ----
             k = max(1, int(round(float(self.params.get("rim_width", 2.0)))))
@@ -1172,25 +1173,26 @@ class ChipDefect(BaseDefect):
             # 边界柔和度越大，交界暗边越淡（暗边也是「边界感」的来源之一）
             out = clip01(out * (1.0 - (0.42 - 0.18 * edge_soft) * rim[:, :, None]))
 
-            # ---- 缺口外侧（背景侧）的细小崩渣 ----
+            # ---- 缺口附近的细小崩渣（陶瓷本色，避免读成灰尘/异物） ----
             if self.params.get("debris", True):
                 deb = np.zeros((h, w), np.float32)
-                for _k in range(rng.randint(2, 6)):
+                for _k in range(rng.randint(1, 4)):
                     a = rng.uniform(0, math.pi * 2)
-                    rr = half * rng.uniform(0.25, 0.95)
-                    dcx = cx - n_in[0] * rr * rng.uniform(0.1, 0.6) \
+                    rr = half * rng.uniform(0.2, 0.9)
+                    dcx = cx - n_in[0] * rr * rng.uniform(0.1, 0.5) \
                         + tan[0] * math.cos(a) * rr * 0.7
-                    dcy = cy - n_in[1] * rr * rng.uniform(0.1, 0.6) \
+                    dcy = cy - n_in[1] * rr * rng.uniform(0.1, 0.5) \
                         + tan[1] * math.cos(a) * rr * 0.7
-                    r = max(0.5, half * rng.uniform(0.012, 0.042))
+                    r = max(0.5, half * rng.uniform(0.010, 0.034))
                     dm2 = filled_circle_mask((h, w), dcx, dcy, r, feather=0.6)
                     dn = fractal_noise((h, w), rng, base_cells=max(8, int(r * 6) + 8),
                                        octaves=2, persistence=0.5)
                     deb = np.maximum(deb, clip01(dm2 * (0.35 + 1.5 * (dn > 0.55))))
                 dmask = clip01(deb) * (1.0 - clip01(reg))
-                dcol = np.array([0.74, 0.72, 0.68], np.float32)
-                out = clip01(out * (1 - dmask[:, :, None] * 0.8)
-                             + dcol[None, None, :] * dmask[:, :, None] * 0.8)
+                # 崩渣用本体材质色（略亮一点），读成「崩落的瓷片」而非灰土
+                dcol = clip01(surr * 1.06)
+                out = clip01(out * (1 - dmask[:, :, None] * 0.5)
+                             + dcol[None, None, :] * dmask[:, :, None] * 0.5)
 
             # ---- 自缺口向内延伸的短裂纹 ----
             cr = float(self.params.get("crack_ratio", 0.30)) * (0.3 + 0.9 * s) * (0.4 + 0.6 * sv)

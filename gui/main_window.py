@@ -283,7 +283,7 @@ class DefectPage(QWidget):
             self._add("depth_ratio", "崩缺深度", 0.05, 0.80, cfg.get("depth_ratio", 0.30))
             self._add("jag_ratio", "崩口锯齿", 0.05, 0.90, cfg.get("jag_ratio", 0.45))
             self._add("edge_soft", "边界柔和度", 0.0, 1.0, cfg.get("edge_soft", 0.45))
-            self._add("color_match", "颜色接近度", 0.0, 1.0, cfg.get("color_match", 0.65))
+            self._add("color_match", "颜色接近度", 0.0, 1.0, cfg.get("color_match", 0.85))
             self._add("corner_bias", "转角倾向", 0.0, 1.0, cfg.get("corner_bias", 0.35))
             self._add("crack_ratio", "延伸裂纹", 0.0, 0.90, cfg.get("crack_ratio", 0.30))
         elif kind == "dot":
